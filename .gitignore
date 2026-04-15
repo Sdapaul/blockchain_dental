@@ -21,3 +21,12 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# 백업 파일
+\#Backup/
+\#Backup.zip
+*.zip
+*.pptx
+
+# Claude Code 내부 설정
+.claude/

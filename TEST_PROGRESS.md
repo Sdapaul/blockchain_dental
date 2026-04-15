@@ -18,6 +18,10 @@ npx serve .
 # 터미널 4 — 만기환급 자동 워처 (선택)
 cd C:\test_bl1
 node scripts/maturity-watcher.js
+
+# 터미널 5 — 진료내역 오라클 서비스 (신규)
+cd C:\test_bl1
+node scripts/oracle-service.js
 ```
 
 브라우저: http://localhost:3000

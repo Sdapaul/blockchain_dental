@@ -7,7 +7,9 @@
     "node": "hardhat node",
     "deploy:local": "hardhat run scripts/deploy.js --network localhost",
     "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
-    "test": "hardhat test"
+    "test": "hardhat test",
+    "oracle": "node scripts/oracle-service.js",
+    "maturity": "node scripts/maturity-watcher.js"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-ethers": "^3.1.3",
