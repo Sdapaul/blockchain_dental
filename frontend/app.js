@@ -35,7 +35,7 @@ const INSURANCE_ABI = [
   "function approveClaim(uint256 claimId)",
   "function rejectClaim(uint256 claimId, string reason)",
   "function payClaim(uint256 claimId)",
-  "function getPolicy(uint256 policyId) view returns (tuple(uint256 id, address patient, string patientName, uint256 monthlyPremium, uint256 coverageLimit, uint256 totalPaid, uint256 lastPaymentTime, uint256 nextDueTime, bool active, uint256 createdAt, uint256 maturityDate, uint256 maturityRefundRate, bool maturityPaid))",
+  "function getPolicy(uint256 policyId) view returns (tuple(uint256 id, address patient, string patientName, uint256 monthlyPremium, uint256 coverageLimit, uint256 totalPaid, uint256 totalClaimed, uint256 lastPaymentTime, uint256 nextDueTime, bool active, uint256 createdAt, uint256 maturityDate, uint256 maturityRefundRate, bool maturityPaid))",
   "function processMaturityRefund(uint256 policyId)",
   "function isMatured(uint256 policyId) view returns (bool)",
   "function getClaim(uint256 claimId) view returns (tuple(uint256 id, uint256 policyId, address patient, uint256 amount, string treatmentCode, string description, uint8 status, uint256 submittedAt, uint256 processedAt, string rejectReason))",
@@ -79,6 +79,7 @@ const INSURANCE_ABI = [
   // ─── 약관대출 (Policy Loan) ────────────────────────────────
   "function requestPolicyLoan(uint256 policyId, uint256 amount)",
   "function repayPolicyLoan(uint256 policyId)",
+  "function repayPolicyLoanPartial(uint256 policyId, uint256 amount)",
   "function getMaxLoanAmount(uint256 policyId) view returns (uint256)",
   "function getCurrentInterest(uint256 policyId) view returns (uint256)",
   "function getLoanRepayAmount(uint256 policyId) view returns (uint256 principal, uint256 interest, uint256 total)",
@@ -697,6 +698,7 @@ async function loadContracts(usdcAddress, insAddress) {
     el("usdcAddr").value = usdcAddr;
     el("insAddr").value  = insAddr;
 
+    updateAdminOnlyVisibility();
     if (isOwner) {
       el("adminBadge").classList.remove("hidden");
       addLog("success", "✅ 관리자 권한 활성화됨 - 보험증권 생성·청구 심사·보험금 지급 가능");
@@ -987,7 +989,9 @@ async function refreshAll() {
       refreshMyBalance(),
       refreshMaturity(),
       refreshApplications(),
-      refreshLoanPolicies()
+      refreshLoanPolicies(),
+      refreshPremiumHistory(),
+      refreshClaimCoverageInfo()
     ]);
   } catch (err) {
     addLog("error", "데이터 새로고침 실패", parseError(err));
@@ -997,41 +1001,67 @@ async function refreshAll() {
 async function refreshStats() {
   if (!insCtx) return;
   try {
-    // ── 기본 통계 (getStats) ─────────────────────────────────
-    const stats = await insCtx.getStats();
-    el("statPremiums").textContent  = fmtUsdc(stats.premiumsCollected);
-    el("statClaims").textContent    = fmtUsdc(stats.claimsPaid);
-    el("statBalance").textContent   = fmtUsdc(stats.contractBalance);
-    el("statClaimsNum").textContent = stats.claimsCount.toString();
+    // 관리자: 전체 계정 합산 / 일반 계정: 본인 데이터만 집계
+    const policyIds = await insCtx.getAllPolicyIds().catch(() => []);
+    let policies  = await Promise.all(policyIds.map(id => insCtx.getPolicy(id).catch(() => null)));
+    policies = policies.filter(Boolean);
+    if (!isOwner) {
+      policies = policies.filter(p => p.patient.toLowerCase() === userAddr?.toLowerCase());
+    }
+    const myPolicyIds = policies.map(p => p.id);
+
+    // ── 계정별 라벨 문구 (관리자: 전체 합산 / 일반: 본인 합계) ──
+    const labelPremiumsEl = el("labelStatPremiums");
+    if (labelPremiumsEl) labelPremiumsEl.textContent = isOwner ? "💳 총 보험료 수납" : "💳 납입 보험료 합계";
+    const labelClaimsEl = el("labelStatClaims");
+    if (labelClaimsEl) labelClaimsEl.textContent = isOwner ? "💰 총 보험금 지급" : "💰 지급받은 보험금 합계";
+
+    // ── 보험료 수납 / 보험금 지급 ────────────────────────────
+    if (isOwner) {
+      const stats = await insCtx.getStats();
+      el("statPremiums").textContent  = fmtUsdc(stats.premiumsCollected);
+      el("statClaims").textContent    = fmtUsdc(stats.claimsPaid);
+      el("statClaimsNum").textContent = stats.claimsCount.toString();
+    } else {
+      const totalPremiums = policies.reduce((sum, p) => sum + BigInt(p.totalPaid), 0n);
+      el("statPremiums").textContent = fmtUsdc(totalPremiums);
+    }
+    el("statBalance").textContent = fmtUsdc(await insCtx.getContractBalance());
 
     // ── 보험증권: 전체 vs 활성 ────────────────────────────────
-    const policyIds = await insCtx.getAllPolicyIds().catch(() => []);
-    const policies  = await Promise.all(policyIds.map(id => insCtx.getPolicy(id).catch(() => null)));
-    const validPolicies = policies.filter(Boolean);
-    const activeCount   = validPolicies.filter(p => p.active).length;
+    const activeCount = policies.filter(p => p.active).length;
     el("statPolicies").textContent      = activeCount.toString();
-    el("statPoliciesTotal").textContent = `전체 ${policyIds.length}건`;
+    el("statPoliciesTotal").textContent = isOwner ? `전체 ${policies.length}건` : `내 증권 ${policies.length}건`;
 
-    // ── 청구: 대기중 건수 ─────────────────────────────────────
-    const claimIds     = await insCtx.getAllClaimIds().catch(() => []);
-    const claims       = await Promise.all(claimIds.map(id => insCtx.getClaim(id).catch(() => null)));
-    const pendingClaims = claims.filter(c => c && Number(c.status) === 0).length;
+    // ── 청구 ──────────────────────────────────────────────────
+    const claimIds = await insCtx.getAllClaimIds().catch(() => []);
+    let claims     = await Promise.all(claimIds.map(id => insCtx.getClaim(id).catch(() => null)));
+    claims = claims.filter(Boolean);
+    if (!isOwner) {
+      claims = claims.filter(c => c.patient.toLowerCase() === userAddr?.toLowerCase());
+    }
+    const pendingClaims = claims.filter(c => Number(c.status) === 0).length;
     el("statClaimsPending").textContent = `대기 ${pendingClaims}건`;
+    if (!isOwner) {
+      el("statClaimsNum").textContent = claims.length.toString();
+      const myClaimsPaid = claims.filter(c => Number(c.status) === 3).reduce((sum, c) => sum + BigInt(c.amount), 0n);
+      el("statClaims").textContent = fmtUsdc(myClaimsPaid);
+    }
 
     // ── 청약 심사 현황 ────────────────────────────────────────
-    const appIds   = await insCtx.getAllApplicationIds().catch(() => []);
-    const apps     = await Promise.all(appIds.map(id => insCtx.getApplication(id).catch(() => null)));
-    const validApps = apps.filter(Boolean);
-    const appPending  = validApps.filter(a => Number(a.status) === 0).length;
-    const appApproved = validApps.filter(a => Number(a.status) === 1).length;
-    const appRejected = validApps.filter(a => Number(a.status) === 2).length;
-    el("statAppPending").textContent  = appPending.toString();
-    el("statAppApproved").textContent = appApproved.toString();
-    el("statAppRejected").textContent = appRejected.toString();
+    const appIds = await insCtx.getAllApplicationIds().catch(() => []);
+    let apps     = await Promise.all(appIds.map(id => insCtx.getApplication(id).catch(() => null)));
+    apps = apps.filter(Boolean);
+    if (!isOwner) {
+      apps = apps.filter(a => a.applicant.toLowerCase() === userAddr?.toLowerCase());
+    }
+    el("statAppPending").textContent  = apps.filter(a => Number(a.status) === 0).length.toString();
+    el("statAppApproved").textContent = apps.filter(a => Number(a.status) === 1).length.toString();
+    el("statAppRejected").textContent = apps.filter(a => Number(a.status) === 2).length.toString();
 
-    // ── 약관대출 현황 ─────────────────────────────────────────
+    // ── 약관대출 현황 (본인/전체 증권 기준) ───────────────────
     const loans = await Promise.all(
-      policyIds.map(id => insCtx.getPolicyLoan(id).catch(() => null))
+      myPolicyIds.map(id => insCtx.getPolicyLoan(id).catch(() => null))
     );
     const activeLoans = loans.filter(l => l && l.active);
     const totalLoanAmt = activeLoans.reduce((sum, l) => sum + BigInt(l.loanAmount), 0n);
@@ -1039,11 +1069,15 @@ async function refreshStats() {
     el("statLoanAmount").textContent = activeLoans.length > 0
       ? `총 ${fmtUsdc(totalLoanAmt)}` : "없음";
 
-    // ── 만기환급 현황 ─────────────────────────────────────────
-    const matured = validPolicies.filter(p => p.maturityPaid);
-    const totalMatAmt = matured.reduce((sum, p) => {
-      return sum + (BigInt(p.totalPaid) * BigInt(p.maturityRefundRate)) / 100n;
-    }, 0n);
+    // ── 만기환급 현황 (실제 지급액은 MaturityRefundPaid 이벤트에서 합산 —
+    //    약관대출이 있었던 건은 원리금 차감 후 순액이 지급되고 현재 상태로는
+    //    복원 불가하므로, totalPaid×refundRate% gross 재계산 대신 이벤트 로그 사용) ─
+    const matured = policies.filter(p => p.maturityPaid);
+    let maturityEvents = await insCtx.queryFilter(insCtx.filters.MaturityRefundPaid()).catch(() => []);
+    if (!isOwner) {
+      maturityEvents = maturityEvents.filter(ev => ev.args.patient.toLowerCase() === userAddr?.toLowerCase());
+    }
+    const totalMatAmt = maturityEvents.reduce((sum, ev) => sum + BigInt(ev.args.refundAmount), 0n);
     el("statMaturityCount").textContent  = matured.length.toString();
     el("statMaturityAmount").textContent = matured.length > 0
       ? `총 ${fmtUsdc(totalMatAmt)}` : "없음";
@@ -1059,6 +1093,8 @@ async function refreshMyBalance() {
     const bal = await usdcCtx.balanceOf(userAddr);
     el("myUsdcBal").textContent     = fmtUsdc(bal);
     el("statMyBalance").textContent = fmtUsdc(bal);
+    const premBalEl = el("premiumMyBalance");
+    if (premBalEl) premBalEl.textContent = fmtUsdc(bal);
   } catch (err) {
     addLog("error", "잔액 조회 실패", parseError(err));
   }
@@ -1226,7 +1262,14 @@ async function refreshPolicies() {
       tbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--text-muted);padding:30px">보험증권이 없습니다</td></tr>`;
       return;
     }
-    const policies = await Promise.all(ids.map(id => insCtx.getPolicy(id)));
+    let policies = await Promise.all(ids.map(id => insCtx.getPolicy(id)));
+    if (!isOwner) {
+      policies = policies.filter(p => p.patient.toLowerCase() === userAddr?.toLowerCase());
+    }
+    if (policies.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--text-muted);padding:30px">보험증권이 없습니다</td></tr>`;
+      return;
+    }
     tbody.innerHTML = policies.map(p => `
       <tr>
         <td><strong>#${p.id}</strong></td>
@@ -1247,13 +1290,29 @@ async function refreshPolicies() {
   }
 }
 
+function updateAdminOnlyVisibility() {
+  ["tabBtnAdmin", "cardCreatePolicy", "cardManualMaturity", "cardAdminAppReview"].forEach(id => {
+    const elm = el(id);
+    if (!elm) return;
+    elm.classList.toggle("hidden", !isOwner);
+  });
+  // 관리자 전용 탭이 열려있는 상태에서 권한을 잃으면(계정 전환 등) 다른 탭으로 이동
+  if (!isOwner && el("tab-admin")?.classList.contains("active")) {
+    showTab("faucet");
+  }
+}
+
 function updatePolicySelect(policies) {
+  // 보험료 납입/청구/자동납부/약관대출은 모두 본인 소유 증권만 대상으로 함
+  const myPolicies = userAddr
+    ? policies.filter(p => p.patient.toLowerCase() === userAddr.toLowerCase())
+    : [];
   ["premiumPolicyId", "claimPolicyId", "autopayPolicyId", "loanPolicyId"].forEach(selId => {
     const sel = el(selId);
     if (!sel) return;
     const cur = sel.value;
     sel.innerHTML = `<option value="">-- 증권 선택 --</option>` +
-      policies.map(p =>
+      myPolicies.map(p =>
         `<option value="${p.id}" ${String(p.id) === cur ? "selected" : ""}>#${p.id} - ${p.patientName} (월 ${fmtUsdc(p.monthlyPremium)})</option>`
       ).join("");
   });
@@ -1356,10 +1415,64 @@ async function payPremium() {
     async () => insSign.payPremium(policyId),
     `보험료 납입: 증권 #${policyId} (${fmtUsdc(amount)})`,
     async () => {
-      await Promise.all([refreshMyBalance(), refreshPolicies(), refreshStats()]);
+      await Promise.all([refreshMyBalance(), refreshPolicies(), refreshStats(), refreshPremiumHistory()]);
       showToast(`보험료 ${fmtUsdc(amount)} ${stableName()} 납입 완료!`, "success");
     }
   );
+}
+
+// ── 납입 이력 (수동 payPremium + 자동 collectPremium 전체) ──────
+async function refreshPremiumHistory() {
+  if (!insCtx) return;
+  const tbody = el("premiumHistoryBody");
+  if (!tbody) return;
+  try {
+    const policyIds = await insCtx.getAllPolicyIds();
+    let policies = await Promise.all(policyIds.map(id => insCtx.getPolicy(id)));
+    if (!isOwner) {
+      policies = policies.filter(p => p.patient.toLowerCase() === userAddr?.toLowerCase());
+    }
+    if (policies.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="text-center" style="color:var(--text-muted);padding:20px">납입 이력이 없습니다</td></tr>`;
+      return;
+    }
+
+    const autoTxHashes = new Set();
+    const rows = [];
+    for (const p of policies) {
+      const [paidEvents, autoEvents] = await Promise.all([
+        insCtx.queryFilter(insCtx.filters.PremiumPaid(p.id)).catch(() => []),
+        insCtx.queryFilter(insCtx.filters.PremiumAutoCollected(p.id)).catch(() => [])
+      ]);
+      autoEvents.forEach(ev => autoTxHashes.add(ev.transactionHash));
+      paidEvents.forEach(ev => rows.push({
+        policyId: p.id,
+        patientName: p.patientName,
+        amount: ev.args.amount,
+        totalPaid: ev.args.totalPaid,
+        timestamp: ev.args.timestamp,
+        isAuto: autoTxHashes.has(ev.transactionHash)
+      }));
+    }
+
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="text-center" style="color:var(--text-muted);padding:20px">납입 이력이 없습니다 (아직 1회도 납입 안 됨)</td></tr>`;
+      return;
+    }
+
+    rows.sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
+    tbody.innerHTML = rows.map(r => `
+      <tr>
+        <td>#${r.policyId}${isOwner ? ` (${r.patientName})` : ""}</td>
+        <td style="font-size:11px">${tsToDate(r.timestamp)}</td>
+        <td class="text-right" style="color:var(--accent-blue)">${fmtUsdc(r.amount)}</td>
+        <td>${r.isAuto ? `<span class="badge badge-approved" style="font-size:10px">🔄 자동</span>` : `<span class="badge" style="font-size:10px;background:rgba(139,148,158,0.15);color:var(--text-muted)">✋ 수동</span>`}</td>
+        <td class="text-right" style="color:var(--text-muted)">${fmtUsdc(r.totalPaid)}</td>
+      </tr>`).join("");
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="5" class="text-center" style="color:var(--accent-red)">조회 실패</td></tr>`;
+    addLog("error", "납입 이력 조회 실패", parseError(err));
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1395,17 +1508,18 @@ async function submitClaim() {
   try {
     addLog("call", `getPolicy(${policyId}) 조회 중...`);
     const policy = await insCtx.getPolicy(policyId);
+    const remaining = policy.coverageLimit - policy.totalClaimed;
     addLog("info", "청구 전 증권 상태 확인",
-      `피보험자  : ${policy.patientName}\n누적납입  : ${fmtUsdc(policy.totalPaid)}\n보장한도  : ${fmtUsdc(policy.coverageLimit)}\n청구금액  : ${fmtUsdc(amount)}\n한도초과  : ${amount > policy.coverageLimit ? "❌ 초과 (거절됨)" : "✅ 범위내"}\n납입여부  : ${policy.totalPaid > 0n ? "✅ 납입 이력 있음" : "❌ 납입 이력 없음 (청구 불가)"}`);
+      `피보험자  : ${policy.patientName}\n누적납입  : ${fmtUsdc(policy.totalPaid)}\n보장한도  : ${fmtUsdc(policy.coverageLimit)}\n누적지급액: ${fmtUsdc(policy.totalClaimed)}\n잔여한도  : ${fmtUsdc(remaining)}\n청구금액  : ${fmtUsdc(amount)}\n한도초과  : ${amount > remaining ? "❌ 초과 (거절됨)" : "✅ 범위내"}\n납입여부  : ${policy.totalPaid > 0n ? "✅ 납입 이력 있음" : "❌ 납입 이력 없음 (청구 불가)"}`);
 
     if (policy.totalPaid === 0n) {
       addLog("error", "청구 불가: 납입 이력 없음",
         "보험료 납입 탭에서 먼저 보험료를 납입해야 청구 가능합니다.");
       showToast("먼저 보험료를 납입하세요.", "error"); return;
     }
-    if (amount > policy.coverageLimit) {
+    if (amount > remaining) {
       addLog("error", "청구 불가: 보장 한도 초과",
-        `청구금액 ${fmtUsdc(amount)} > 보장한도 ${fmtUsdc(policy.coverageLimit)}`);
+        `청구금액 ${fmtUsdc(amount)} > 잔여한도 ${fmtUsdc(remaining)} (보장한도 ${fmtUsdc(policy.coverageLimit)} - 누적지급액 ${fmtUsdc(policy.totalClaimed)})`);
       showToast("보장 한도를 초과하는 금액입니다.", "error"); return;
     }
   } catch (err) {
@@ -1418,10 +1532,30 @@ async function submitClaim() {
     async () => {
       el("claimAmount").value = "";
       el("claimDesc").value   = "";
-      await refreshClaims();
+      await Promise.all([refreshClaims(), refreshClaimCoverageInfo()]);
       showToast("보험금 청구가 접수되었습니다.", "success");
     }
   );
+}
+
+// ── 선택된 증권의 보장한도/누적지급액/청구가능액 표시 ──────────
+async function refreshClaimCoverageInfo() {
+  const box = el("claimCoverageInfo");
+  if (!box) return;
+  const policyId = el("claimPolicyId")?.value;
+  if (!policyId || !insCtx) { box.style.display = "none"; return; }
+
+  try {
+    const policy = await insCtx.getPolicy(policyId);
+    const available = policy.coverageLimit - policy.totalClaimed;
+    el("claimCoverageLimit").textContent = fmtUsdc(policy.coverageLimit);
+    el("claimTotalClaimed").textContent  = fmtUsdc(policy.totalClaimed);
+    el("claimAvailable").textContent     = fmtUsdc(available);
+    box.style.display = "block";
+  } catch (err) {
+    box.style.display = "none";
+    addLog("error", "보장한도 조회 실패", parseError(err));
+  }
 }
 
 async function refreshClaims() {
@@ -1439,10 +1573,17 @@ async function refreshClaims() {
       Promise.all(ids.map(id => insCtx.getClaim(id))),
       Promise.all(ids.map(id => insCtx.getOracleVerification(id).catch(() => null)))
     ]);
-    tbody.innerHTML = claims.map((c, i) => {
+    let rows = claims.map((c, i) => ({ c, ov: oracleVerifs[i] }));
+    if (!isOwner) {
+      rows = rows.filter(({ c }) => c.patient.toLowerCase() === userAddr?.toLowerCase());
+    }
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="9" class="text-center" style="color:var(--text-muted);padding:30px">청구 내역이 없습니다</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = rows.map(({ c, ov }) => {
       const statusIdx = Number(c.status);
       const isMine    = c.patient.toLowerCase() === userAddr?.toLowerCase();
-      const ov        = oracleVerifs[i];
       const isOracle  = ov && ov.exists;
       const oracleBadge = isOracle
         ? `<span style="font-size:10px;background:${ov.approved ? "rgba(35,134,54,0.15)" : "rgba(218,54,51,0.15)"};color:${ov.approved ? "var(--accent-green)" : "var(--accent-red)"};padding:1px 5px;border-radius:3px;margin-left:4px" title="오라클 검증: ${ov.verificationCode}&#10;병원: ${ov.hospitalName}">🏥 ${ov.approved ? "오라클승인" : "오라클거절"}</span>`
@@ -1492,10 +1633,15 @@ async function approveClaim(claimId) {
         `청구 #${claimId} 현재 상태: "${CLAIM_STATUS[Number(claim.status)]}"\n→ 대기중(Pending) 상태만 승인 가능합니다.`);
       showToast("대기중 상태의 청구만 승인 가능합니다.", "error"); return;
     }
-    // 컨트랙트 잔액 사전 확인
+    // 보장한도 잔여액 확인 (실제 차감은 지급 시점에 검증되지만 미리 안내)
+    const policy    = await insCtx.getPolicy(claim.policyId);
+    const remaining = policy.coverageLimit - policy.totalClaimed;
+    addLog("info", "보장한도 확인",
+      `보장한도   : ${fmtUsdc(policy.coverageLimit)}\n누적지급액 : ${fmtUsdc(policy.totalClaimed)}\n잔여한도   : ${fmtUsdc(remaining)}\n이 청구금액: ${fmtUsdc(claim.amount)}\n한도초과여부: ${claim.amount > remaining ? "⚠️ 초과 (지급 단계에서 revert 예상)" : "✅ 범위내"}`);
+    // 보험사 잔액 사전 확인
     const contractBal = await insCtx.getContractBalance();
-    addLog("info", "컨트랙트 잔액 확인",
-      `컨트랙트 잔액 : ${fmtUsdc(contractBal)}\n청구 금액      : ${fmtUsdc(claim.amount)}\n지급 가능 여부 : ${contractBal >= claim.amount ? "✅ 가능" : "⚠️ 잔액 부족 (지급 단계에서 실패 가능)"}`);
+    addLog("info", "보험사 잔액 확인",
+      `보험사 잔액   : ${fmtUsdc(contractBal)}\n청구 금액      : ${fmtUsdc(claim.amount)}\n지급 가능 여부 : ${contractBal >= claim.amount ? "✅ 가능" : "⚠️ 잔액 부족 (지급 단계에서 실패 가능)"}`);
   } catch (err) {
     addLog("error", "청구 사전 확인 실패", parseError(err));
   }
@@ -1530,18 +1676,25 @@ async function payClaim(claimId) {
   // 사전 확인
   try {
     const claim       = await insCtx.getClaim(claimId);
+    const policy      = await insCtx.getPolicy(claim.policyId);
+    const remaining   = policy.coverageLimit - policy.totalClaimed;
     const contractBal = await insCtx.getContractBalance();
     addLog("info", `지급 전 확인 (청구 #${claimId})`,
-      `수령자        : ${claim.patient}\n청구금액      : ${fmtUsdc(claim.amount)}\n컨트랙트잔액  : ${fmtUsdc(contractBal)}\n지급가능여부  : ${contractBal >= claim.amount ? "✅ 가능" : "❌ 잔액 부족 → TX 실패 예상"}\n현재상태      : ${CLAIM_STATUS[Number(claim.status)]}`);
+      `수령자        : ${claim.patient}\n청구금액      : ${fmtUsdc(claim.amount)}\n보장한도      : ${fmtUsdc(policy.coverageLimit)}\n누적지급액    : ${fmtUsdc(policy.totalClaimed)}\n잔여한도      : ${fmtUsdc(remaining)}\n한도초과여부  : ${claim.amount > remaining ? "⚠️ 초과 → TX 실패 예상" : "✅ 범위내"}\n보험사잔액    : ${fmtUsdc(contractBal)}\n지급가능여부  : ${contractBal >= claim.amount ? "✅ 가능" : "❌ 잔액 부족 → TX 실패 예상"}\n현재상태      : ${CLAIM_STATUS[Number(claim.status)]}`);
     if (Number(claim.status) !== 1) {
       addLog("error", "지급 불가",
         `청구 #${claimId} 현재 상태: "${CLAIM_STATUS[Number(claim.status)]}"\n→ 승인됨(Approved) 상태만 지급 가능합니다.`);
       showToast("승인된 청구만 지급 가능합니다.", "error"); return;
     }
+    if (claim.amount > remaining) {
+      addLog("error", "보장한도 초과",
+        `청구금액 ${fmtUsdc(claim.amount)} > 잔여한도 ${fmtUsdc(remaining)} (보장한도 ${fmtUsdc(policy.coverageLimit)} - 누적지급액 ${fmtUsdc(policy.totalClaimed)})`);
+      showToast("보장 한도를 초과하는 청구입니다.", "error"); return;
+    }
     if (contractBal < claim.amount) {
-      addLog("error", "컨트랙트 잔액 부족",
+      addLog("error", "보험사 잔액 부족",
         `필요: ${fmtUsdc(claim.amount)}\n보유: ${fmtUsdc(contractBal)}\n→ 관리자 패널 > 준비금 입금에서 먼저 입금하세요.`);
-      showToast("컨트랙트 잔액이 부족합니다. 준비금을 먼저 입금하세요.", "error"); return;
+      showToast("보험사 잔액이 부족합니다. 준비금을 먼저 입금하세요.", "error"); return;
     }
   } catch (err) {
     addLog("error", "지급 사전 확인 실패", parseError(err));
@@ -1737,7 +1890,7 @@ async function refreshBlockchainState() {
     el("stateProfit").className   = `kv-value ${profit >= 0n ? "green" : "red"}`;
 
     addLog("call", "블록체인 상태 조회 완료",
-      `블록 #${block.number} | 컨트랙트잔액: ${fmtUsdc(stats.contractBalance)} | 내잔액: ${fmtUsdc(myBal)}`);
+      `블록 #${block.number} | 보험사잔액: ${fmtUsdc(stats.contractBalance)} | 내잔액: ${fmtUsdc(myBal)}`);
   } catch (err) {
     addLog("error", "블록체인 상태 조회 실패", parseError(err));
   }
@@ -1761,7 +1914,14 @@ async function refreshMaturity() {
     const block = await provider.getBlock("latest");
     const blockTs = Number(block.timestamp);
 
-    const policies = await Promise.all(ids.map(id => insCtx.getPolicy(id)));
+    let policies = await Promise.all(ids.map(id => insCtx.getPolicy(id)));
+    if (!isOwner) {
+      policies = policies.filter(p => p.patient.toLowerCase() === userAddr?.toLowerCase());
+    }
+    if (policies.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" class="text-center" style="color:var(--text-muted);padding:30px">보험증권이 없습니다</td></tr>`;
+      return;
+    }
     tbody.innerHTML = policies.map(p => {
       const matDate    = Number(p.maturityDate);
       const rate       = Number(p.maturityRefundRate);
@@ -1827,6 +1987,15 @@ async function queryMaturityRefund() {
     const refundAmt = (BigInt(p.totalPaid) * BigInt(rate)) / 100n;
     const remaining = matDate - blockTs;
 
+    const loan = await insCtx.getPolicyLoan(id);
+    let netRefundAmt = refundAmt;
+    let loanTotal = 0n;
+    if (loan.active) {
+      const interest = await insCtx.getCurrentInterest(id);
+      loanTotal = BigInt(loan.loanAmount) + BigInt(interest);
+      netRefundAmt = loanTotal >= refundAmt ? 0n : refundAmt - loanTotal;
+    }
+
     let statusText;
     if (p.maturityPaid)        statusText = "💎 지급완료";
     else if (!p.active)        statusText = "비활성";
@@ -1844,7 +2013,11 @@ async function queryMaturityRefund() {
       "지갑 주소":    p.patient,
       "납입 보험료 합계": fmtUsdc(p.totalPaid),
       "만기환급율":   rate + "%",
-      "예상 환급액":  fmtUsdc(refundAmt),
+      "총환급액":     fmtUsdc(refundAmt),
+      ...(loan.active ? {
+        "약관대출 원리금": fmtUsdc(loanTotal),
+        "실지급 예상액":   fmtUsdc(netRefundAmt)
+      } : {}),
       "만기일":       new Date(matDate * 1000).toLocaleString("ko-KR"),
       "현재 상태":    statusText,
       "지급 완료 여부": p.maturityPaid ? "✅ 완료" : "❌ 미지급"
@@ -1852,7 +2025,9 @@ async function queryMaturityRefund() {
 
     el("maturityQueryResult").textContent = JSON.stringify(result, null, 2);
     addLog("success", `만기환급 조회 완료 (증권 #${id})`,
-      `환급 예정액: ${fmtUsdc(refundAmt)} | 상태: ${statusText}`);
+      loan.active
+        ? `총환급액: ${fmtUsdc(refundAmt)} | 대출원리금: ${fmtUsdc(loanTotal)} | 실지급 예상액: ${fmtUsdc(netRefundAmt)} | 상태: ${statusText}`
+        : `환급 예정액: ${fmtUsdc(refundAmt)} | 상태: ${statusText}`);
   } catch (err) {
     el("maturityQueryResult").textContent = "오류: " + err.message;
     addLog("error", `만기환급 조회 실패 (증권 #${id})`, parseError(err));
@@ -1865,13 +2040,22 @@ async function processMaturityRefund(policyId) {
     showToast("관리자만 만기환급 지급 가능합니다.", "error"); return;
   }
   try {
-    const policy     = await insCtx.getPolicy(policyId);
-    const refundAmt  = (BigInt(policy.totalPaid) * BigInt(policy.maturityRefundRate)) / 100n;
+    const policy      = await insCtx.getPolicy(policyId);
+    const refundAmt    = (BigInt(policy.totalPaid) * BigInt(policy.maturityRefundRate)) / 100n;
+    const loan         = await insCtx.getPolicyLoan(policyId);
+    let netRefundAmt   = refundAmt;
+    let loanLine        = "";
+    if (loan.active) {
+      const interest  = await insCtx.getCurrentInterest(policyId);
+      const loanTotal = BigInt(loan.loanAmount) + BigInt(interest);
+      netRefundAmt    = loanTotal >= refundAmt ? 0n : refundAmt - loanTotal;
+      loanLine        = `\n약관대출 활성 : 원리금 ${fmtUsdc(loanTotal)} (원금 ${fmtUsdc(loan.loanAmount)}+이자 ${fmtUsdc(interest)}) 차감 예정`;
+    }
     const contractBal = await insCtx.getContractBalance();
     addLog("info", `만기환급 사전 확인 (증권 #${policyId})`,
-      `피보험자    : ${policy.patientName}\n납입 합계   : ${fmtUsdc(policy.totalPaid)}\n환급율      : ${policy.maturityRefundRate}%\n환급 예정액 : ${fmtUsdc(refundAmt)}\n컨트랙트잔액: ${fmtUsdc(contractBal)}`);
-    if (contractBal < refundAmt) {
-      showToast("컨트랙트 잔액 부족. 준비금을 먼저 입금하세요.", "error"); return;
+      `피보험자    : ${policy.patientName}\n납입 합계   : ${fmtUsdc(policy.totalPaid)}\n환급율      : ${policy.maturityRefundRate}%\n총환급액    : ${fmtUsdc(refundAmt)}${loanLine}\n실지급 예상액: ${fmtUsdc(netRefundAmt)}\n보험사잔액  : ${fmtUsdc(contractBal)}`);
+    if (contractBal < netRefundAmt) {
+      showToast("보험사 잔액 부족. 준비금을 먼저 입금하세요.", "error"); return;
     }
   } catch (err) {
     addLog("error", "사전 확인 실패", parseError(err));
@@ -1906,6 +2090,7 @@ async function refreshAutopaySchedule() {
     for (const id of ids) {
       const p = await insCtx.getPolicy(id);
       if (!p.active) continue;
+      if (!isOwner && p.patient.toLowerCase() !== userAddr?.toLowerCase()) continue;
 
       const now      = Math.floor(Date.now() / 1000);
       const isDue    = now >= Number(p.nextDueTime);
@@ -2133,7 +2318,14 @@ async function refreshApplications() {
       return;
     }
 
-    const apps = await Promise.all(ids.map(id => insCtx.getApplication(id)));
+    let apps = await Promise.all(ids.map(id => insCtx.getApplication(id)));
+    if (!isOwner) {
+      apps = apps.filter(a => a.applicant.toLowerCase() === userAddr?.toLowerCase());
+    }
+    if (apps.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="12" class="text-center" style="color:var(--text-muted);padding:30px">청약 내역이 없습니다</td></tr>`;
+      return;
+    }
     tbody.innerHTML = apps.slice().reverse().map(a => {
       const statusIdx = Number(a.status);
       const riskColor = a.riskScore >= 60 ? "var(--accent-red)" : a.riskScore >= 30 ? "var(--accent-yellow)" : "var(--accent-green)";
@@ -2289,6 +2481,60 @@ async function repayPolicyLoan() {
   }
 }
 
+async function repayPolicyLoanPartial() {
+  if (!insSign) { showToast("컨트랙트를 먼저 연결하세요.", "warning"); return; }
+  const policyId = el("loanPolicyId")?.value;
+  if (!policyId) { showToast("보험증권을 선택하세요.", "warning"); return; }
+
+  const amountRaw = el("loanPartialAmount")?.value;
+  const amount = parseUsdc(amountRaw);
+  if (amount <= 0n) { showToast("상환 금액을 입력하세요.", "warning"); return; }
+
+  addLog("step", `[약관대출 부분상환] 증권 #${policyId} — ${fmtUsdc(amount)} 상환 시도`);
+
+  try {
+    const repay = await insCtx.getLoanRepayAmount(policyId);
+    addLog("info", "현재 상환 정보 확인",
+      `원금: ${fmtUsdc(repay.principal)} / 이자: ${fmtUsdc(repay.interest)} / 총 상환액: ${fmtUsdc(repay.total)}\n입력 금액: ${fmtUsdc(amount)}`);
+
+    if (amount < repay.interest) {
+      addLog("error", "이자 미달", `발생 이자(${fmtUsdc(repay.interest)})보다 적은 금액은 부분상환할 수 없습니다. 이자를 먼저 전액 충당해야 합니다.`);
+      showToast(`최소 이자(${fmtUsdc(repay.interest)}) 이상 입력하세요.`, "error"); return;
+    }
+    if (amount > repay.total) {
+      addLog("error", "총 상환액 초과", `총 상환액(${fmtUsdc(repay.total)})보다 큰 금액입니다. 전액 상환은 [대출 상환하기] 버튼을 이용하세요.`);
+      showToast("총 상환액을 초과했습니다. 전액 상환 버튼을 이용하세요.", "error"); return;
+    }
+
+    const bal = await usdcCtx.balanceOf(userAddr).catch(() => 0n);
+    if (bal < amount) {
+      addLog("error", "잔액 부족", `필요: ${fmtUsdc(amount)} / 보유: ${fmtUsdc(bal)}`);
+      showToast(`잔액 부족: ${fmtUsdc(amount)} 필요`, "error"); return;
+    }
+
+    const allowance = await usdcCtx.allowance(userAddr, insAddr);
+    if (allowance < amount) {
+      addLog("step", `[1단계] ${stableName()} approve(${fmtUsdc(amount)}) 요청`);
+      const approveTx = await usdcSign.approve(insAddr, ethers.MaxUint256);
+      await approveTx.wait();
+      addLog("success", "[1단계] approve 완료", `TX: ${approveTx.hash}`);
+    }
+
+    await sendTx(
+      async () => insSign.repayPolicyLoanPartial(policyId, amount),
+      `약관대출 부분상환 (증권 #${policyId}): ${fmtUsdc(amount)}`,
+      async () => {
+        el("loanPartialAmount").value = "";
+        await Promise.all([refreshMyBalance(), refreshLoanInfo(), refreshLoanPolicies()]);
+        showToast("부분 상환 완료!", "success");
+      }
+    );
+  } catch (err) {
+    addLog("error", "부분 상환 실패", parseError(err));
+    showToast("부분 상환 실패: " + (err.reason || err.message), "error");
+  }
+}
+
 async function refreshLoanPolicies() {
   if (!insCtx) return;
   try {
@@ -2342,6 +2588,10 @@ async function refreshLoanPolicies() {
 
 // ── 탭 전환 ──────────────────────────────────────────────────
 function showTab(tabName) {
+  if (tabName === "admin" && !isOwner) {
+    showToast("관리자 계정만 접근할 수 있습니다.", "error");
+    return;
+  }
   document.querySelectorAll(".tab-content").forEach(t => t.classList.remove("active"));
   document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
   const tabEl = el(`tab-${tabName}`);
@@ -2350,7 +2600,9 @@ function showTab(tabName) {
   if (btnEl) btnEl.classList.add("active");
   if (tabName === "state")          refreshBlockchainState();
   if (tabName === "policy")         refreshPolicies();
+  if (tabName === "premium")        refreshPremiumHistory();
   if (tabName === "claim" || tabName === "admin") refreshClaims();
+  if (tabName === "claim")          refreshClaimCoverageInfo();
   if (tabName === "log")            updateLogCounters();
   if (tabName === "maturity")       refreshMaturity();
   if (tabName === "autopay")        refreshAutopaySchedule();

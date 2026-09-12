@@ -33,6 +33,8 @@ const ABI = [
   "function oracleModeEnabled() view returns (bool)",
   "function oracleAddress() view returns (address)",
   "function oracleVerifyAndProcess(uint256 claimId, bool approved, bytes32 dataHash, string hospitalName, string verificationCode) external",
+  "function getPolicy(uint256) view returns (tuple(uint256 id, address patient, string patientName, uint256 monthlyPremium, uint256 coverageLimit, uint256 totalPaid, uint256 totalClaimed, uint256 lastPaymentTime, uint256 nextDueTime, bool active, uint256 createdAt, uint256 maturityDate, uint256 maturityRefundRate, bool maturityPaid))",
+  "function AUTO_CLAIM_APPROVAL_PERCENT() view returns (uint256)",
   "event ClaimSubmitted(uint256 indexed claimId, uint256 indexed policyId, address indexed patient, uint256 amount, string treatmentCode, uint256 timestamp)",
   "event ClaimOracleVerified(uint256 indexed claimId, bool approved, bytes32 dataHash, string hospitalName, uint256 timestamp)",
 ];
@@ -61,6 +63,19 @@ async function processClaimWithOracle(contract, claimId, decimals, currency) {
 
   if (Number(claim.status) !== 0) {
     log(`  └─ 청구 #${claimId} 상태: ${["Pending","Approved","Rejected","Paid"][Number(claim.status)]} — 스킵`);
+    return;
+  }
+
+  const modeEnabled = await contract.oracleModeEnabled().catch(() => true);
+  if (!modeEnabled) {
+    log(`  └─ 청구 #${claimId} — 오라클 모드 비활성화 상태, 관리자 수동 심사 대기 (스킵)`);
+    return;
+  }
+
+  const policy = await contract.getPolicy(claim.policyId).catch(() => null);
+  const autoPercent = await contract.AUTO_CLAIM_APPROVAL_PERCENT().catch(() => 20n);
+  if (policy && claim.amount > (policy.coverageLimit * autoPercent) / 100n) {
+    log(`  └─ 청구 #${claimId} — 보장한도의 ${autoPercent}% 초과, 오라클 처리 불가 → 관리자 수동 심사 대기 (스킵)`);
     return;
   }
 

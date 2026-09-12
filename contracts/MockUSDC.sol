@@ -14,10 +14,7 @@ contract MockUSDC is ERC20, Ownable {
 
     event FaucetUsed(address indexed user, uint256 amount);
 
-    constructor() ERC20("Mock USD Coin", "USDC") Ownable(msg.sender) {
-        // 초기 100만 USDC 발행 (관리자에게)
-        _mint(msg.sender, 1_000_000 * 10**6);
-    }
+    constructor() ERC20("Mock USD Coin", "USDC") Ownable(msg.sender) {}
 
     function decimals() public pure override returns (uint8) {
         return DECIMALS;

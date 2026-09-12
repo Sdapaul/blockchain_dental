@@ -25,6 +25,7 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
         uint256 monthlyPremium;   // USDC (6 decimals)
         uint256 coverageLimit;    // USDC (6 decimals)
         uint256 totalPaid;        // 누적 납입 보험료
+        uint256 totalClaimed;     // 누적 지급된 보험금
         uint256 lastPaymentTime;  // 마지막 납입 시각
         uint256 nextDueTime;      // 다음 납입 기한
         bool    active;
@@ -109,7 +110,8 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
     // 자동 심사 룰 파라미터 (관리자 변경 가능)
     uint256 public minAge                    = 18;
     uint256 public maxAge                    = 75;
-    uint256 public maxCoverageRatio          = 100;  // coverageLimit / monthlyPremium 최대 배율
+    uint256 public maxCoverageRatio          = 100;  // 이 배수 초과 시 즉시 거절
+    uint256 public autoApproveRatio          = 10;   // 이 배수 이하면 자동승인, 초과~maxCoverageRatio 이하는 관리자 심사
     uint256 public minMonthlyPremium         = 1_000000; // 최소 1 USDC
     uint256 public maxActivePoliciesPerPerson = 3;
 
@@ -296,9 +298,15 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
         string  calldata hospitalName,
         string  calldata verificationCode
     ) external onlyOracle nonReentrant {
+        require(oracleModeEnabled, "Oracle mode disabled");
         Claim storage claim = claims[claimId];
         require(claim.id != 0,                       "Claim not found");
         require(claim.status == ClaimStatus.Pending, "Claim not pending");
+        // 20% 초과 청구는 오라클 모드와 무관하게 항상 관리자 수동 심사 전용 — 오라클은 절대 처리 불가
+        require(
+            claim.amount <= (policies[claim.policyId].coverageLimit * AUTO_CLAIM_APPROVAL_PERCENT) / 100,
+            "Exceeds oracle auto limit"
+        );
 
         oracleVerifications[claimId] = OracleVerification({
             exists:           true,
@@ -312,10 +320,8 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
         claim.processedAt = block.timestamp;
 
         if (approved) {
-            require(
-                stablecoin.balanceOf(address(this)) >= claim.amount,
-                "Insufficient contract balance"
-            );
+            _accrueClaim(policies[claim.policyId], claim.amount);
+            _requireBalance(claim.amount);
             claim.status = ClaimStatus.Paid;
             totalClaimsPaid += claim.amount;
             require(
@@ -359,7 +365,7 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
         require(bytes(patientName).length > 0, "Patient name required");
         require(monthlyPremium > 0, "Premium must be > 0");
         require(coverageLimit > 0, "Coverage limit must be > 0");
-        require(maturityDate > block.timestamp, "Maturity date must be in the future");
+        require(maturityDate > block.timestamp, "Maturity must be in future");
         require(maturityRefundRate <= 100, "Refund rate must be <= 100");
         return _createPolicyInternal(patient, patientName, monthlyPremium, coverageLimit, maturityDate, maturityRefundRate);
     }
@@ -384,6 +390,7 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
             monthlyPremium:    monthlyPremium,
             coverageLimit:     coverageLimit,
             totalPaid:         0,
+            totalClaimed:      0,
             lastPaymentTime:   0,
             nextDueTime:       block.timestamp + 30 days,
             active:            true,
@@ -408,8 +415,9 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
     /**
      * @dev 보험 청약 신청 (누구나 호출 가능)
      *      스마트 컨트랙트가 자동으로 심사 룰을 체크한다.
-     *      - 심사 통과: Pending → 관리자가 최종 승인/거절
-     *      - 심사 실패: 즉시 Rejected (트랜잭션은 성공, revert 아님)
+     *      - 보장한도/월보험료 비율이 autoApproveRatio 이하: 즉시 자동승인 + 증권 생성
+     *      - maxCoverageRatio 초과: 즉시 거절 (트랜잭션은 성공, 청약만 거절 처리)
+     *      - 그 사이 구간: 대기(Pending) → 관리자가 approveApplication/rejectApplication으로 심사
      */
     function submitApplication(
         string  calldata applicantName,
@@ -425,74 +433,91 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
         require(maturityDays > 0, "Maturity days must be > 0");
         require(maturityRefundRate <= 100, "Refund rate must be <= 100");
 
-        (bool passed, string memory rejectReason, uint8 score) =
+        (uint8 decision, string memory rejectReason, uint8 score) =
             _underwrite(msg.sender, age, monthlyPremium, coverageLimit);
 
         uint256 appId = nextApplicationId++;
+        Application storage app = applications[appId];
+        app.id                 = appId;
+        app.applicant          = msg.sender;
+        app.applicantName      = applicantName;
+        app.age                = age;
+        app.monthlyPremium     = monthlyPremium;
+        app.coverageLimit      = coverageLimit;
+        app.maturityDays       = maturityDays;
+        app.maturityRefundRate = maturityRefundRate;
+        app.submittedAt        = block.timestamp;
+        app.riskScore          = score;
 
-        applications[appId] = Application({
-            id:                appId,
-            applicant:         msg.sender,
-            applicantName:     applicantName,
-            age:               age,
-            monthlyPremium:    monthlyPremium,
-            coverageLimit:     coverageLimit,
-            maturityDays:      maturityDays,
-            maturityRefundRate: maturityRefundRate,
-            status:            passed ? ApplicationStatus.Pending : ApplicationStatus.Rejected,
-            submittedAt:       block.timestamp,
-            processedAt:       passed ? 0 : block.timestamp,
-            rejectReason:      rejectReason,
-            policyId:          0,
-            riskScore:         score
-        });
+        if (decision == 1) {
+            _grantApproval(app);
+        } else if (decision == 2) {
+            app.status = ApplicationStatus.Pending;
+        } else {
+            _rejectApplication(app, rejectReason);
+        }
 
         _applicantApplications[msg.sender].push(appId);
         _allApplicationIds.push(appId);
 
         emit ApplicationSubmitted(appId, msg.sender, applicantName, score, block.timestamp);
-        if (!passed) {
-            emit ApplicationRejected(appId, msg.sender, rejectReason, block.timestamp);
-        }
-
         return appId;
     }
 
     /**
+     * @dev 청약 승인 처리 공용 로직 (즉시 자동승인 / 관리자 수동승인 겸용) — 증권 생성 + 상태 갱신 + 이벤트
+     */
+    function _grantApproval(Application storage app) internal returns (uint256 policyId) {
+        policyId = _createPolicyInternal(
+            app.applicant, app.applicantName, app.monthlyPremium, app.coverageLimit,
+            block.timestamp + app.maturityDays * 1 days, app.maturityRefundRate
+        );
+        app.status      = ApplicationStatus.Approved;
+        app.processedAt = block.timestamp;
+        app.policyId    = policyId;
+        emit ApplicationApproved(app.id, policyId, block.timestamp);
+    }
+
+    /**
+     * @dev 청약 거절 처리 공용 로직 (즉시 자동거절 / 관리자 수동거절 겸용)
+     */
+    function _rejectApplication(Application storage app, string memory reason) internal {
+        app.status       = ApplicationStatus.Rejected;
+        app.processedAt  = block.timestamp;
+        app.rejectReason = reason;
+        emit ApplicationRejected(app.id, app.applicant, reason, block.timestamp);
+    }
+
+    /**
      * @dev 내부 자동 심사 룰 엔진
-     *      반환: (통과여부, 거절사유, 위험점수 0~100)
+     *      반환: (decision: 0=거절 1=자동승인 2=관리자심사대기, 거절사유, 위험점수 0~100)
      */
     function _underwrite(
         address applicant,
         uint256 age,
         uint256 monthlyPremium,
         uint256 coverageLimit
-    ) internal view returns (bool passed, string memory reason, uint8 score) {
+    ) internal view returns (uint8 decision, string memory reason, uint8 score) {
         // ① 연령 체크
         if (age < minAge)
-            return (false, unicode"청약 불가: 만 18세 미만 가입 불가", 100);
+            return (0, unicode"만 18세 미만 가입 불가", 100);
         if (age > maxAge)
-            return (false, unicode"청약 불가: 만 75세 초과 가입 불가", 100);
+            return (0, unicode"만 75세 초과 가입 불가", 100);
 
         // ② 최소 보험료 체크
         if (monthlyPremium < minMonthlyPremium)
-            return (false, unicode"청약 불가: 월 보험료가 최소 기준(1 USDC) 미달", 90);
+            return (0, unicode"보험료 최소기준 미달", 90);
 
-        // ③ 보장/보험료 비율 체크
-        uint256 ratio = coverageLimit / monthlyPremium;
-        if (ratio > maxCoverageRatio)
-            return (false, unicode"청약 불가: 보장한도/월보험료 비율이 100배 초과", 80);
+        // ③ 보장/보험료 비율 체크 (정수 나눗셈 truncation 방지 위해 곱셈으로 비교)
+        if (coverageLimit > monthlyPremium * maxCoverageRatio)
+            return (0, unicode"보장비율 100배 초과", 80);
 
         // ④ 1인 최대 활성 증권 수 체크
-        uint256[] storage patPolicies = _patientPolicies[applicant];
-        uint256 activeCount = 0;
-        for (uint256 i = 0; i < patPolicies.length; i++) {
-            if (policies[patPolicies[i]].active) activeCount++;
-        }
-        if (activeCount >= maxActivePoliciesPerPerson)
-            return (false, unicode"청약 불가: 1인 최대 가입 한도(3건) 초과", 90);
+        if (_activePolicyCount(applicant) >= maxActivePoliciesPerPerson)
+            return (0, unicode"1인 가입한도 초과", 90);
 
         // ⑤ 위험 점수 계산
+        uint256 ratio = coverageLimit / monthlyPremium; // 위험점수 계산용
         uint8 riskScore = 0;
         if      (age >= 65) riskScore += 40;
         else if (age >= 50) riskScore += 25;
@@ -503,48 +528,64 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
 
         if (riskScore > 100) riskScore = 100;
 
-        return (true, "", riskScore);
+        // ⑥ 비율이 autoApproveRatio 이하면 즉시 자동승인, 그 외(~maxCoverageRatio)는 관리자 심사 대기
+        if (coverageLimit <= monthlyPremium * autoApproveRatio) {
+            return (1, "", riskScore);
+        }
+        return (2, "", riskScore);
     }
 
     /**
-     * @dev 청약 최종 승인 (관리자) → 보험증권 자동 생성
+     * @dev 특정 신청자의 현재 활성 증권 수 계산 (심사·승인 공용)
+     */
+    function _activePolicyCount(address applicant) internal view returns (uint256) {
+        uint256[] storage patPolicies = _patientPolicies[applicant];
+        uint256 activeCount = 0;
+        for (uint256 i = 0; i < patPolicies.length; i++) {
+            if (policies[patPolicies[i]].active) activeCount++;
+        }
+        return activeCount;
+    }
+
+    /**
+     * @dev 본인 소유 + 활성 상태인 증권 조회 (payPremium/submitClaim 공용)
+     */
+    function _ownedActivePolicy(uint256 policyId) internal view returns (Policy storage policy) {
+        policy = _activePolicy(policyId);
+        require(policy.patient == msg.sender, "Not the policy holder");
+    }
+
+    /**
+     * @dev 존재+활성 상태인 증권 조회 (소유자 무관, 관리자용 함수 공용)
+     */
+    function _activePolicy(uint256 policyId) internal view returns (Policy storage policy) {
+        policy = policies[policyId];
+        require(policy.id != 0, "Policy not found");
+        require(policy.active,  "Policy not active");
+    }
+
+    /**
+     * @dev 청약 최종 승인 (관리자) — autoApproveRatio~maxCoverageRatio 구간의 대기(Pending) 청약 전용
      */
     function approveApplication(uint256 appId) external onlyOwner returns (uint256) {
         Application storage app = applications[appId];
-        require(app.id != 0,                                "Application not found");
-        require(app.status == ApplicationStatus.Pending,    "Application not pending");
-
-        app.status      = ApplicationStatus.Approved;
-        app.processedAt = block.timestamp;
-
-        uint256 maturityDate = block.timestamp + app.maturityDays * 1 days;
-        uint256 policyId = _createPolicyInternal(
-            app.applicant,
-            app.applicantName,
-            app.monthlyPremium,
-            app.coverageLimit,
-            maturityDate,
-            app.maturityRefundRate
+        require(app.id != 0,                             "Application not found");
+        require(app.status == ApplicationStatus.Pending, "Application not pending");
+        require(
+            _activePolicyCount(app.applicant) < maxActivePoliciesPerPerson,
+            unicode"1인 가입한도 초과"
         );
-
-        app.policyId = policyId;
-        emit ApplicationApproved(appId, policyId, block.timestamp);
-        return policyId;
+        return _grantApproval(app);
     }
 
     /**
-     * @dev 청약 거절 (관리자)
+     * @dev 청약 거절 (관리자) — 대기(Pending) 청약 전용
      */
     function rejectApplication(uint256 appId, string calldata reason) external onlyOwner {
         Application storage app = applications[appId];
-        require(app.id != 0,                                "Application not found");
-        require(app.status == ApplicationStatus.Pending,    "Application not pending");
-
-        app.status       = ApplicationStatus.Rejected;
-        app.processedAt  = block.timestamp;
-        app.rejectReason = reason;
-
-        emit ApplicationRejected(appId, app.applicant, reason, block.timestamp);
+        require(app.id != 0,                             "Application not found");
+        require(app.status == ApplicationStatus.Pending, "Application not pending");
+        _rejectApplication(app, reason);
     }
 
     /**
@@ -606,21 +647,15 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
      *      대출 한도: 해지환급금(totalPaid × refundRate%)의 maxLoanRatio%
      */
     function requestPolicyLoan(uint256 policyId, uint256 amount) external nonReentrant {
-        Policy storage policy = policies[policyId];
-        require(policy.id != 0,                "Policy not found");
-        require(policy.active,                 "Policy not active");
-        require(policy.patient == msg.sender,  "Not the policy holder");
+        Policy storage policy = _ownedActivePolicy(policyId);
         require(policy.totalPaid > 0,          "No premiums paid yet");
-        require(!policyLoans[policyId].active, "Existing loan not yet repaid");
+        require(!policyLoans[policyId].active, "Existing loan not repaid");
 
         uint256 maxAmount = getMaxLoanAmount(policyId);
-        require(maxAmount > 0,         "Surrender value is zero - pay more premiums first");
+        require(maxAmount > 0,         "Surrender value is zero");
         require(amount > 0,            "Loan amount must be > 0");
         require(amount <= maxAmount,   "Exceeds max loan amount");
-        require(
-            stablecoin.balanceOf(address(this)) >= amount,
-            "Insufficient contract balance"
-        );
+        _requireBalance(amount);
 
         policyLoans[policyId] = PolicyLoan({
             policyId:     policyId,
@@ -639,11 +674,7 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
      *      사전에 USDC approve 필요
      */
     function repayPolicyLoan(uint256 policyId) external nonReentrant {
-        PolicyLoan storage loan = policyLoans[policyId];
-        require(loan.active, "No active loan for this policy");
-
-        Policy storage policy = policies[policyId];
-        require(policy.patient == msg.sender, "Not the policy holder");
+        PolicyLoan storage loan = _loanForRepay(policyId);
 
         uint256 principal = loan.loanAmount;
         uint256 interest  = getCurrentInterest(policyId);
@@ -651,13 +682,52 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
 
         require(
             stablecoin.transferFrom(msg.sender, address(this), total),
-            "Transfer failed - check USDC allowance"
+            "Insufficient allowance"
         );
 
         loan.active      = false;
         loan.loanAmount  = 0;
 
         emit PolicyLoanRepaid(policyId, msg.sender, principal, interest, block.timestamp);
+    }
+
+    /**
+     * @dev 약관대출 부분 상환 (피보험자) — 발생 이자는 항상 전액 먼저 충당하고,
+     *      초과분은 원금 상환에 사용. 원금이 0이 되면 대출이 자동으로 종료됨.
+     *      상환 후 이자 계산 시점(borrowedAt)이 지금으로 갱신되어 남은 원금 기준으로 새로 이자가 붙음.
+     *      사전에 USDC approve 필요
+     */
+    function repayPolicyLoanPartial(uint256 policyId, uint256 amount) external nonReentrant {
+        PolicyLoan storage loan = _loanForRepay(policyId);
+        require(amount > 0, "Amount must be > 0");
+
+        uint256 interest = getCurrentInterest(policyId);
+        require(amount >= interest, "Must cover accrued interest");
+        uint256 total = loan.loanAmount + interest;
+        require(amount <= total, "Exceeds total owed");
+
+        require(
+            stablecoin.transferFrom(msg.sender, address(this), amount),
+            "Insufficient allowance"
+        );
+
+        uint256 principalPaid = amount - interest;
+        loan.loanAmount -= principalPaid;
+        loan.borrowedAt  = block.timestamp;
+        if (loan.loanAmount == 0) {
+            loan.active = false;
+        }
+
+        emit PolicyLoanRepaid(policyId, msg.sender, principalPaid, interest, block.timestamp);
+    }
+
+    /**
+     * @dev 상환 함수 공용 검증 (활성 대출 + 본인 확인)
+     */
+    function _loanForRepay(uint256 policyId) internal view returns (PolicyLoan storage loan) {
+        loan = policyLoans[policyId];
+        require(loan.active, "No active loan for this policy");
+        require(policies[policyId].patient == msg.sender, "Not the policy holder");
     }
 
     /**
@@ -695,15 +765,12 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
      *      사전에 USDC approve 필요
      */
     function payPremium(uint256 policyId) external nonReentrant {
-        Policy storage policy = policies[policyId];
-        require(policy.id != 0,              "Policy not found");
-        require(policy.active,               "Policy not active");
-        require(policy.patient == msg.sender, "Not the policy holder");
+        Policy storage policy = _ownedActivePolicy(policyId);
 
         uint256 amount = policy.monthlyPremium;
         require(
             stablecoin.transferFrom(msg.sender, address(this), amount),
-            "USDC transfer failed - check allowance"
+            "Insufficient allowance"
         );
 
         policy.totalPaid       += amount;
@@ -719,6 +786,38 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
     // ─────────────────────────────────────────
 
     /**
+     * @dev 보장한도 내인지 확인 후 누적 지급액 갱신 (오라클 자동지급/payClaim 공용)
+     */
+    function _accrueClaim(Policy storage policy, uint256 amount) internal {
+        require(policy.totalClaimed + amount <= policy.coverageLimit, "Exceeds coverage limit");
+        policy.totalClaimed += amount;
+    }
+
+    /**
+     * @dev 컨트랙트가 amount만큼 지급할 잔액이 있는지 확인 (공용)
+     */
+    function _requireBalance(uint256 amount) internal view {
+        require(stablecoin.balanceOf(address(this)) >= amount, "Insufficient contract balance");
+    }
+
+    // 보장한도의 20% 이하 소액 청구는 오라클·관리자 승인 없이 즉시 자동 지급
+    uint256 public constant AUTO_CLAIM_APPROVAL_PERCENT = 20;
+
+    /**
+     * @dev 소액 청구 자동 승인+지급 (submitClaim 공용)
+     */
+    function _autoPayClaim(Claim storage claim, Policy storage policy) internal {
+        _accrueClaim(policy, claim.amount);
+        _requireBalance(claim.amount);
+        claim.status      = ClaimStatus.Paid;
+        claim.processedAt = block.timestamp;
+        totalClaimsPaid   += claim.amount;
+        require(stablecoin.transfer(claim.patient, claim.amount), "USDC transfer failed");
+        emit ClaimApproved(claim.id, claim.policyId, claim.amount, block.timestamp);
+        emit ClaimPaid(claim.id, claim.policyId, claim.patient, claim.amount, block.timestamp);
+    }
+
+    /**
      * @dev 보험금 청구 제출 (피보험자)
      * @param policyId 보험증권 ID
      * @param amount 청구 금액 (USDC, 6 decimals)
@@ -731,13 +830,10 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
         string  calldata treatmentCode,
         string  calldata description
     ) external returns (uint256) {
-        Policy storage policy = policies[policyId];
-        require(policy.id != 0,               "Policy not found");
-        require(policy.active,                "Policy not active");
-        require(policy.patient == msg.sender,  "Not the policy holder");
+        Policy storage policy = _ownedActivePolicy(policyId);
         require(policy.totalPaid > 0,          "No premiums paid yet");
         require(amount > 0,                   "Claim amount must be > 0");
-        require(amount <= policy.coverageLimit, "Exceeds coverage limit");
+        require(policy.totalClaimed + amount <= policy.coverageLimit, "Exceeds coverage limit");
         require(bytes(treatmentCode).length > 0, "Treatment code required");
 
         uint256 claimId = nextClaimId++;
@@ -760,6 +856,13 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
         totalClaimsSubmitted++;
 
         emit ClaimSubmitted(claimId, policyId, msg.sender, amount, treatmentCode, block.timestamp);
+
+        // 오라클 모드 ON + 보장한도 20% 이하 소액 청구만 즉시 자동 승인+지급.
+        // 오라클 모드 OFF면 20% 이하도 대기(Pending) → 관리자 수동 심사 필요.
+        if (oracleModeEnabled && amount <= (policy.coverageLimit * AUTO_CLAIM_APPROVAL_PERCENT) / 100) {
+            _autoPayClaim(claims[claimId], policy);
+        }
+
         return claimId;
     }
 
@@ -771,9 +874,7 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
      * @dev 보험금 청구 승인 (관리자 전용)
      */
     function approveClaim(uint256 claimId) external onlyOwner {
-        Claim storage claim = claims[claimId];
-        require(claim.id != 0,                        "Claim not found");
-        require(claim.status == ClaimStatus.Pending,  "Claim not in pending status");
+        Claim storage claim = _pendingClaim(claimId);
 
         claim.status      = ClaimStatus.Approved;
         claim.processedAt = block.timestamp;
@@ -782,12 +883,19 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev 청구 ID로 대기중(Pending) 청구 조회 (approveClaim/rejectClaim 공용)
+     */
+    function _pendingClaim(uint256 claimId) internal view returns (Claim storage claim) {
+        claim = claims[claimId];
+        require(claim.id != 0,                       "Claim not found");
+        require(claim.status == ClaimStatus.Pending, "Claim not in pending status");
+    }
+
+    /**
      * @dev 보험금 청구 거절 (관리자 전용)
      */
     function rejectClaim(uint256 claimId, string calldata reason) external onlyOwner {
-        Claim storage claim = claims[claimId];
-        require(claim.id != 0,                        "Claim not found");
-        require(claim.status == ClaimStatus.Pending,  "Claim not in pending status");
+        Claim storage claim = _pendingClaim(claimId);
 
         claim.status       = ClaimStatus.Rejected;
         claim.processedAt  = block.timestamp;
@@ -804,10 +912,9 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
         Claim storage claim = claims[claimId];
         require(claim.id != 0,                         "Claim not found");
         require(claim.status == ClaimStatus.Approved,  "Claim not approved");
-        require(
-            stablecoin.balanceOf(address(this)) >= claim.amount,
-            "Insufficient contract balance"
-        );
+
+        _accrueClaim(policies[claim.policyId], claim.amount);
+        _requireBalance(claim.amount);
 
         claim.status = ClaimStatus.Paid;
         totalClaimsPaid += claim.amount;
@@ -829,24 +936,35 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
      *      만기일 도달 + 미지급 상태인 증권에 대해 환급금 자동 지급
      */
     function processMaturityRefund(uint256 policyId) external onlyOwner nonReentrant {
-        Policy storage policy = policies[policyId];
-        require(policy.id != 0,               "Policy not found");
-        require(policy.active,                "Policy not active");
+        Policy storage policy = _activePolicy(policyId);
         require(!policy.maturityPaid,         "Maturity refund already paid");
         require(block.timestamp >= policy.maturityDate, "Policy not yet matured");
         require(policy.totalPaid > 0,         "No premiums paid");
 
         uint256 refundAmount = (policy.totalPaid * policy.maturityRefundRate) / 100;
         require(refundAmount > 0,             "Refund amount is 0");
-        require(
-            stablecoin.balanceOf(address(this)) >= refundAmount,
-            "Insufficient contract balance"
-        );
+
+        PolicyLoan storage loan = policyLoans[policyId];
+        if (loan.active) {
+            uint256 principal = loan.loanAmount;
+            uint256 interest  = getCurrentInterest(policyId);
+            uint256 loanTotal = principal + interest;
+
+            refundAmount = loanTotal >= refundAmount ? 0 : refundAmount - loanTotal;
+
+            loan.active     = false;
+            loan.loanAmount = 0;
+            emit PolicyLoanRepaid(policyId, policy.patient, principal, interest, block.timestamp);
+        }
+
+        _requireBalance(refundAmount);
 
         policy.maturityPaid = true;
         policy.active       = false;
 
-        require(stablecoin.transfer(policy.patient, refundAmount), "Transfer failed");
+        if (refundAmount > 0) {
+            require(stablecoin.transfer(policy.patient, refundAmount), "Transfer failed");
+        }
 
         emit MaturityRefundPaid(policyId, policy.patient, refundAmount, block.timestamp);
         emit PolicyDeactivated(policyId, block.timestamp);
@@ -862,15 +980,13 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
      *      납입 기한(nextDueTime) 도달 후에만 실행 가능
      */
     function collectPremium(uint256 policyId) external onlyOwner nonReentrant {
-        Policy storage policy = policies[policyId];
-        require(policy.id != 0,                "Policy not found");
-        require(policy.active,                 "Policy not active");
+        Policy storage policy = _activePolicy(policyId);
         require(block.timestamp >= policy.nextDueTime, "Premium not yet due");
 
         uint256 amount = policy.monthlyPremium;
         require(
             stablecoin.allowance(policy.patient, address(this)) >= amount,
-            "Insufficient allowance - patient must approve auto-pay"
+            "Insufficient allowance"
         );
         require(
             stablecoin.balanceOf(policy.patient) >= amount,
@@ -911,6 +1027,7 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
             policy.id != 0 &&
             policy.active &&
             !policy.maturityPaid &&
+            policy.totalPaid > 0 &&
             block.timestamp >= policy.maturityDate
         );
     }

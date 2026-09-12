@@ -28,7 +28,7 @@ const CONFIG_PATH = path.join(__dirname, "..", "frontend", "config.json");
 // ── ABI ───────────────────────────────────────────────────────────
 const INSURANCE_ABI = [
   "function getAllPolicyIds() view returns (uint256[])",
-  "function getPolicy(uint256) view returns (tuple(uint256 id, address patient, string patientName, uint256 monthlyPremium, uint256 coverageLimit, uint256 totalPaid, uint256 lastPaymentTime, uint256 nextDueTime, bool active, uint256 createdAt, uint256 maturityDate, uint256 maturityRefundRate, bool maturityPaid))",
+  "function getPolicy(uint256) view returns (tuple(uint256 id, address patient, string patientName, uint256 monthlyPremium, uint256 coverageLimit, uint256 totalPaid, uint256 totalClaimed, uint256 lastPaymentTime, uint256 nextDueTime, bool active, uint256 createdAt, uint256 maturityDate, uint256 maturityRefundRate, bool maturityPaid))",
   "function isDue(uint256) view returns (bool)",
   "function collectPremium(uint256) external",
   "event PremiumAutoCollected(uint256 indexed policyId, address indexed patient, uint256 amount, uint256 totalPaid, uint256 timestamp)",

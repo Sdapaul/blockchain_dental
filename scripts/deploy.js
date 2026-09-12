@@ -37,14 +37,17 @@ async function main() {
   const insuranceAddress = await insurance.getAddress();
   console.log(`  ✅ DentalInsurance(USDC) 배포 완료: ${insuranceAddress}`);
 
-  // 3. USDC 준비금 입금 (50,000 USDC)
+  // 3. USDC 준비금 입금 (50,000 USDC) + 관리자 시작 잔액(1,000 USDC — 다른 계정과 동일)
   console.log("\n[3/8] USDC 준비금 입금 중... (50,000 USDC)");
   const usdcReserve = ethers.parseUnits("50000", 6);
-  let tx = await usdc.approve(insuranceAddress, usdcReserve);
+  const adminStartBalance = ethers.parseUnits("1000", 6);
+  let tx = await usdc.mint(deployer.address, usdcReserve + adminStartBalance);
+  await tx.wait();
+  tx = await usdc.approve(insuranceAddress, usdcReserve);
   await tx.wait();
   tx = await insurance.depositFunds(usdcReserve);
   await tx.wait();
-  console.log(`  ✅ USDC 준비금 입금 완료: 50,000 USDC`);
+  console.log(`  ✅ USDC 준비금 입금 완료: 50,000 USDC (관리자 잔액 1,000 USDC로 시작)`);
 
   // 4. USDC 샘플 보험증권
   console.log("\n[4/8] USDC 샘플 보험증권 생성 중...");
@@ -103,16 +106,17 @@ async function main() {
   await tx.wait();
   console.log(`  ✅ KRW 심사 룰 설정 완료: 최소 보험료 10,000원`);
 
-  // KRW 준비금 입금 (70,000,000 KRW ≈ $50,000)
-  const krwReserve = BigInt("70000000"); // 7천만원 (0 decimals)
-  // 배포자에게 먼저 KRW 민팅
-  tx = await krw.faucet(krwReserve);
+  // KRW 준비금 입금 (10,000,000원) + 관리자 시작 잔액(1,000,000원 — 다른 계정과 동일)
+  const krwReserve = BigInt("10000000"); // 1천만원 (0 decimals)
+  const krwAdminStartBalance = BigInt("1000000"); // 100만원
+  // 배포자에게 준비금 + 시작잔액만큼 먼저 KRW 민팅
+  tx = await krw.faucet(krwReserve + krwAdminStartBalance);
   await tx.wait();
   tx = await krw.approve(insuranceKrwAddress, krwReserve);
   await tx.wait();
   tx = await insuranceKrw.depositFunds(krwReserve);
   await tx.wait();
-  console.log(`  ✅ KRW 준비금 입금 완료: 70,000,000 KRW`);
+  console.log(`  ✅ KRW 준비금 입금 완료: 10,000,000 KRW (관리자 잔액 1,000,000 KRW로 시작)`);
 
   // KRW 샘플 보험증권
   const krwMaturity30 = now + 30 * 60;
@@ -127,8 +131,8 @@ async function main() {
       krwMaturity30, refundRate
     );
     await tx.wait();
-    await krw.connect(accounts[1]).faucet(BigInt("2000000")); // 200만원
-    console.log(`  ✅ KRW 증권 #1: 김덴탈 | 월 ₩70,000 | 한도 ₩1,400,000 | 200만원 지급`);
+    await krw.connect(accounts[1]).faucet(BigInt("1000000")); // 100만원
+    console.log(`  ✅ KRW 증권 #1: 김덴탈 | 월 ₩70,000 | 한도 ₩1,400,000 | 100만원 지급`);
   }
 
   // 계정 #2 - 이치과 (월 112,000원)
@@ -140,29 +144,31 @@ async function main() {
       krwMaturity45, refundRate
     );
     await tx.wait();
-    await krw.connect(accounts[2]).faucet(BigInt("2000000")); // 200만원
-    console.log(`  ✅ KRW 증권 #2: 이치과 | 월 ₩112,000 | 한도 ₩2,800,000 | 200만원 지급`);
+    await krw.connect(accounts[2]).faucet(BigInt("1000000")); // 100만원
+    console.log(`  ✅ KRW 증권 #2: 이치과 | 월 ₩112,000 | 한도 ₩2,800,000 | 100만원 지급`);
   }
 
   // ── 샘플 청약 신청 (USDC 계약 기준) ─────────────────────────
-  console.log("\n[7/8] 샘플 청약 신청 중... (심사 테스트용)");
+  console.log("\n[7/8] 샘플 청약 신청 중... (자동심사 테스트용)");
 
   if (accounts.length > 4) {
     await usdc.connect(accounts[4]).faucet(ethers.parseUnits("1000", 6));
+    // 비율 500/60 ≈ 8.3배 (10배 이하) → 즉시 자동승인
     tx = await insurance.connect(accounts[4]).submitApplication(
-      "박청약", 35, ethers.parseUnits("60", 6), ethers.parseUnits("3000", 6), 365, 70
+      "박청약", 35, ethers.parseUnits("60", 6), ethers.parseUnits("500", 6), 365, 70
     );
     await tx.wait();
-    console.log(`  ✅ 청약 #1: 박청약 (35세) — 심사 대기중 | ${accounts[4].address}`);
+    console.log(`  ✅ 청약 #1: 박청약 (35세) — 비율 8.3배(10배 이하), 즉시 자동승인 및 증권 생성 | ${accounts[4].address}`);
   }
 
   if (accounts.length > 5) {
     await usdc.connect(accounts[5]).faucet(ethers.parseUnits("1000", 6));
+    // 비율 2000/40 = 50배 (10~100배 사이) → 관리자 심사 대기
     tx = await insurance.connect(accounts[5]).submitApplication(
       "최이십", 20, ethers.parseUnits("40", 6), ethers.parseUnits("2000", 6), 180, 60
     );
     await tx.wait();
-    console.log(`  ✅ 청약 #2: 최이십 (20세) — 심사 대기중 | ${accounts[5].address}`);
+    console.log(`  ✅ 청약 #2: 최이십 (20세) — 비율 50배(10~100배), 관리자 심사 대기중 | ${accounts[5].address}`);
   }
 
   if (accounts.length > 6) {
@@ -179,20 +185,18 @@ async function main() {
     ? accounts[3].address
     : "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65";
 
-  // USDC 컨트랙트 Oracle
+  // USDC 컨트랙트 Oracle (주소는 등록하되, 모드는 기본 OFF —
+  // 20% 초과 청구는 기본적으로 관리자 수동 심사를 거치도록 함.
+  // 필요 시 관리자 패널에서 오라클 모드를 ON으로 켤 수 있음)
   tx = await insurance.setOracleAddress(ORACLE_ADDRESS);
-  await tx.wait();
-  tx = await insurance.setOracleMode(true);
   await tx.wait();
 
   // KRW 컨트랙트 Oracle
   tx = await insuranceKrw.setOracleAddress(ORACLE_ADDRESS);
   await tx.wait();
-  tx = await insuranceKrw.setOracleMode(true);
-  await tx.wait();
 
   console.log(`  ✅ Oracle 주소 등록  : ${ORACLE_ADDRESS}`);
-  console.log(`  ✅ Oracle 모드       : USDC + KRW 양쪽 활성화`);
+  console.log(`  ✅ Oracle 모드       : USDC + KRW 양쪽 비활성화 (기본값 — 20% 초과 청구는 관리자 수동 심사)`);
 
   // ── 배포 정보 저장 ────────────────────────────────────────────
   const config = {

@@ -22,9 +22,11 @@ const CONFIG_PATH = path.join(__dirname, "..", "frontend", "config.json");
 // ── ABI ───────────────────────────────────────────────────────────
 const ABI = [
   "function getAllPolicyIds() view returns (uint256[])",
-  "function getPolicy(uint256) view returns (tuple(uint256 id, address patient, string patientName, uint256 monthlyPremium, uint256 coverageLimit, uint256 totalPaid, uint256 lastPaymentTime, uint256 nextDueTime, bool active, uint256 createdAt, uint256 maturityDate, uint256 maturityRefundRate, bool maturityPaid))",
+  "function getPolicy(uint256) view returns (tuple(uint256 id, address patient, string patientName, uint256 monthlyPremium, uint256 coverageLimit, uint256 totalPaid, uint256 totalClaimed, uint256 lastPaymentTime, uint256 nextDueTime, bool active, uint256 createdAt, uint256 maturityDate, uint256 maturityRefundRate, bool maturityPaid))",
   "function isMatured(uint256) view returns (bool)",
   "function processMaturityRefund(uint256) external",
+  "function getPolicyLoan(uint256) view returns (tuple(uint256 policyId, uint256 loanAmount, uint256 borrowedAt, uint256 interestRate, bool active))",
+  "function getCurrentInterest(uint256) view returns (uint256)",
   "event MaturityRefundPaid(uint256 indexed policyId, address indexed patient, uint256 refundAmount, uint256 timestamp)"
 ];
 
@@ -51,12 +53,20 @@ async function watchContract(contract, decimals, currency, processed) {
       const matured = await contract.isMatured(policyId);
       if (!matured) continue;
 
-      const policy    = await contract.getPolicy(policyId);
-      const refundAmt = (BigInt(policy.totalPaid) * BigInt(policy.maturityRefundRate)) / 100n;
+      const policy      = await contract.getPolicy(policyId);
+      const grossRefund = (BigInt(policy.totalPaid) * BigInt(policy.maturityRefundRate)) / 100n;
+      const loan        = await contract.getPolicyLoan(policyId);
 
       log(`⏰ [${currency}] 증권 #${policyId} 만기 도달!`);
       log(`   피보험자: ${policy.patientName} (${policy.patient})`);
-      log(`   납입 합계: ${fmtAmount(policy.totalPaid, decimals)}  환급율: ${policy.maturityRefundRate}%  환급액: ${fmtAmount(refundAmt, decimals)}`);
+      log(`   납입 합계: ${fmtAmount(policy.totalPaid, decimals)}  환급율: ${policy.maturityRefundRate}%  총환급액: ${fmtAmount(grossRefund, decimals)}`);
+
+      if (loan.active) {
+        const interest  = await contract.getCurrentInterest(policyId);
+        const loanTotal = BigInt(loan.loanAmount) + BigInt(interest);
+        const netRefund = loanTotal >= grossRefund ? 0n : grossRefund - loanTotal;
+        log(`   ⚠️  약관대출 활성 — 원리금 ${fmtAmount(loanTotal, decimals)}(원금 ${fmtAmount(loan.loanAmount, decimals)}+이자 ${fmtAmount(interest, decimals)}) 차감 예정 → 실지급 예상액: ${fmtAmount(netRefund, decimals)}`);
+      }
       log(`   processMaturityRefund(${policyId}) 실행 중...`);
 
       try {

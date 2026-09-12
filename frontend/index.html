@@ -94,61 +94,63 @@
 ════════════════════════════════════════════════ -->
 <div class="stats-bar">
   <div class="stats-inner">
-    <!-- 기본 보험 현황 -->
-    <div class="stat-card blue">
-      <div class="stat-label">💳 총 보험료 수납</div>
-      <div class="stat-value" id="statPremiums">-</div>
-    </div>
-    <div class="stat-card green">
-      <div class="stat-label">💰 총 보험금 지급</div>
-      <div class="stat-value" id="statClaims">-</div>
-    </div>
-    <div class="stat-card yellow">
-      <div class="stat-label">🏦 컨트랙트 잔액</div>
-      <div class="stat-value" id="statBalance">-</div>
-    </div>
-    <div class="stat-card cyan">
-      <div class="stat-label">📋 활성 보험증권</div>
-      <div class="stat-value" id="statPolicies">-</div>
-      <div class="stat-sub" id="statPoliciesTotal">전체 -건</div>
-    </div>
-    <div class="stat-card red">
-      <div class="stat-label">🦷 청구 건수</div>
-      <div class="stat-value" id="statClaimsNum">-</div>
-      <div class="stat-sub" id="statClaimsPending">대기 -건</div>
-    </div>
     <!-- 청약 심사 현황 -->
-    <div class="stat-card orange">
+    <div class="stat-card orange clickable" onclick="showTab('underwriting')">
       <div class="stat-label">📝 청약 대기중</div>
       <div class="stat-value" id="statAppPending">-</div>
       <div class="stat-sub">심사 예정</div>
     </div>
-    <div class="stat-card green">
+    <div class="stat-card green clickable" onclick="showTab('underwriting')">
       <div class="stat-label">✅ 청약 승인</div>
       <div class="stat-value" id="statAppApproved">-</div>
       <div class="stat-sub">증권 생성됨</div>
     </div>
-    <div class="stat-card red">
+    <div class="stat-card red clickable" onclick="showTab('underwriting')">
       <div class="stat-label">❌ 청약 거절</div>
       <div class="stat-value" id="statAppRejected">-</div>
       <div class="stat-sub">심사 불통과</div>
     </div>
+    <!-- 보험증권 현황 -->
+    <div class="stat-card cyan clickable" onclick="showTab('policy')">
+      <div class="stat-label">📋 활성 보험증권</div>
+      <div class="stat-value" id="statPolicies">-</div>
+      <div class="stat-sub" id="statPoliciesTotal">전체 -건</div>
+    </div>
     <!-- 약관대출 현황 -->
-    <div class="stat-card purple">
+    <div class="stat-card purple clickable" onclick="showTab('loan')">
       <div class="stat-label">💵 활성 대출 건수</div>
       <div class="stat-value" id="statLoanCount">-</div>
       <div class="stat-sub" id="statLoanAmount">총 -</div>
     </div>
+    <!-- 청구 현황 -->
+    <div class="stat-card red clickable" onclick="showTab('claim')">
+      <div class="stat-label">🦷 청구 건수</div>
+      <div class="stat-value" id="statClaimsNum">-</div>
+      <div class="stat-sub" id="statClaimsPending">대기 -건</div>
+    </div>
     <!-- 만기환급 현황 -->
-    <div class="stat-card teal">
+    <div class="stat-card teal clickable" onclick="showTab('maturity')">
       <div class="stat-label">💎 만기환급 건수</div>
       <div class="stat-value" id="statMaturityCount">-</div>
       <div class="stat-sub" id="statMaturityAmount">총 -</div>
+    </div>
+    <!-- 기본 보험 현황 (금액) -->
+    <div class="stat-card blue clickable" onclick="showTab('premium')">
+      <div class="stat-label" id="labelStatPremiums">💳 총 보험료 수납</div>
+      <div class="stat-value" id="statPremiums">-</div>
+    </div>
+    <div class="stat-card green clickable" onclick="showTab('claim')">
+      <div class="stat-label" id="labelStatClaims">💰 총 보험금 지급</div>
+      <div class="stat-value" id="statClaims">-</div>
     </div>
     <!-- 내 잔액 -->
     <div class="stat-card blue">
       <div class="stat-label">👛 내 잔액</div>
       <div class="stat-value" id="statMyBalance">-</div>
+    </div>
+    <div class="stat-card yellow">
+      <div class="stat-label">🏦 보험사 잔액</div>
+      <div class="stat-value" id="statBalance">-</div>
     </div>
   </div>
 </div>
@@ -161,14 +163,14 @@
   <!-- 탭 네비게이션 -->
   <nav class="tab-nav">
     <button id="tabBtnFaucet" class="tab-btn active" data-tab="faucet"  onclick="showTab('faucet')">💰 파우셋</button>
+    <button class="tab-btn" data-tab="underwriting" onclick="showTab('underwriting')">📝 계약 심사</button>
     <button class="tab-btn" data-tab="policy"  onclick="showTab('policy')">📋 보험증권 관리</button>
     <button class="tab-btn" data-tab="premium" onclick="showTab('premium')">💳 보험료 납입</button>
-    <button class="tab-btn" data-tab="claim"   onclick="showTab('claim')">🦷 보험금 청구</button>
-    <button class="tab-btn" data-tab="admin"    onclick="showTab('admin')">⚙️ 관리자 패널</button>
     <button class="tab-btn" data-tab="autopay"      onclick="showTab('autopay')">🔄 자동납부<span id="autopayAlertBadge" style="color:var(--accent-red);font-size:11px"></span></button>
-    <button class="tab-btn" data-tab="maturity"     onclick="showTab('maturity')">💎 만기환급<span id="maturityAlertBadge" style="color:var(--accent-red);font-size:11px"></span></button>
-    <button class="tab-btn" data-tab="underwriting" onclick="showTab('underwriting')">📝 계약 심사</button>
     <button class="tab-btn" data-tab="loan"         onclick="showTab('loan')">💵 약관대출</button>
+    <button class="tab-btn" data-tab="claim"   onclick="showTab('claim')">🦷 보험금 청구</button>
+    <button class="tab-btn" data-tab="maturity"     onclick="showTab('maturity')">💎 만기환급<span id="maturityAlertBadge" style="color:var(--accent-red);font-size:11px"></span></button>
+    <button id="tabBtnAdmin" class="tab-btn hidden" data-tab="admin"    onclick="showTab('admin')">⚙️ 관리자 패널</button>
     <button class="tab-btn" data-tab="state"        onclick="showTab('state')">📊 블록체인 상태</button>
     <button class="tab-btn" data-tab="log"          onclick="showTab('log')">📜 거래 로그</button>
   </nav>
@@ -242,7 +244,7 @@
   <div class="tab-content" id="tab-policy">
 
     <!-- 증권 생성 (관리자) -->
-    <div class="card">
+    <div class="card hidden" id="cardCreatePolicy">
       <div class="card-title">📋 새 보험증권 생성 <span style="font-size:11px;color:var(--accent-yellow);font-weight:400">(관리자 전용)</span></div>
       <div class="admin-only-note">⚠️ 이 기능은 컨트랙트 오너(관리자)만 사용 가능합니다.</div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;align-items:end">
@@ -350,14 +352,25 @@
       <div>
         <div class="card">
           <div class="card-title">📊 납입 현황</div>
-          <div style="text-align:center;padding:20px 0">
+          <div style="text-align:center;padding:12px 0">
             <div style="color:var(--text-muted);font-size:13px">내 USDC 잔액</div>
-            <div style="font-size:36px;font-weight:700;color:var(--accent-green);margin:8px 0" id="statMyBalance">-</div>
+            <div style="font-size:32px;font-weight:700;color:var(--accent-green);margin:6px 0" id="premiumMyBalance">-</div>
           </div>
           <hr class="divider">
-          <p style="font-size:12px;color:var(--text-muted);text-align:center">
-            보험증권 목록에서 누적 납입 금액을 확인하세요
-          </p>
+          <div class="card-title" style="margin-top:0;font-size:14px;display:flex;justify-content:space-between;align-items:center">
+            <span>납입 이력 (수동+자동 전체)</span>
+            <button class="btn btn-ghost btn-sm" onclick="refreshPremiumHistory()">🔄</button>
+          </div>
+          <div class="table-wrap" style="max-height:280px;overflow-y:auto">
+            <table>
+              <thead>
+                <tr><th>증권</th><th>일시</th><th class="text-right">금액</th><th>방식</th><th class="text-right">누적</th></tr>
+              </thead>
+              <tbody id="premiumHistoryBody">
+                <tr><td colspan="5" class="text-center" style="color:var(--text-muted);padding:20px">증권을 연결하면 표시됩니다</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -374,9 +387,17 @@
           <div class="card-title">🦷 보험금 청구 접수</div>
           <div class="form-group">
             <label>보험증권 선택</label>
-            <select id="claimPolicyId" class="form-control">
+            <select id="claimPolicyId" class="form-control" onchange="refreshClaimCoverageInfo()">
               <option value="">-- 증권을 먼저 연결하세요 --</option>
             </select>
+          </div>
+          <div id="claimCoverageInfo" class="alert alert-info" style="display:none;font-size:13px">
+            <span>💰</span>
+            <div>
+              보장 한도: <strong id="claimCoverageLimit">-</strong> ·
+              누적 지급액: <strong id="claimTotalClaimed">-</strong> ·
+              <strong style="color:var(--accent-green)">청구 가능액: <span id="claimAvailable">-</span></strong>
+            </div>
           </div>
           <div class="form-group">
             <label id="claimAmountLabel">청구 금액 (USDC)</label>
@@ -436,8 +457,9 @@
           <ul style="padding-left:16px;line-height:1.9;color:var(--text-secondary);font-size:13px">
             <li>청구 금액은 보장 한도 이내여야 합니다</li>
             <li>보험료 납입 내역이 있어야 청구 가능합니다</li>
-            <li>청구 후 관리자 심사를 통해 승인/거절 결정됩니다</li>
-            <li>승인 시 관리자가 보험금을 지급 처리합니다</li>
+            <li><strong style="color:var(--accent-green)">청구금액이 보장한도의 20% 이하</strong> + <strong>오라클 모드 ON</strong> → 청구 제출과 동시에 자동 승인+즉시 지급 (관리자 심사 없음)</li>
+            <li><strong>보장한도의 20% 초과</strong> → 오라클 모드 상태와 무관하게 <strong style="color:var(--accent-red)">항상 관리자 수동 심사</strong> 필요 (오라클은 절대 처리 불가)</li>
+            <li>오라클 모드가 <strong>OFF</strong>면 20% 이하 청구도 자동지급되지 않고 대기중(Pending) 상태로 남아 관리자 수동 심사를 거칩니다</li>
             <li>모든 청구 내역은 블록체인에 영구 기록됩니다</li>
           </ul>
 
@@ -539,7 +561,7 @@
           </div>
           <div class="alert alert-warning" style="margin-top:12px">
             <span>⚠️</span>
-            <div>지급 처리 전 컨트랙트 잔액이 청구 금액보다 많아야 합니다. 부족 시 준비금을 먼저 입금하세요.</div>
+            <div>지급 처리 전 보험사 잔액이 청구 금액보다 많아야 합니다. 부족 시 준비금을 먼저 입금하세요.</div>
           </div>
         </div>
 
@@ -799,7 +821,7 @@
     </div>
 
     <!-- 수동 지급 (관리자) -->
-    <div class="card">
+    <div class="card hidden" id="cardManualMaturity">
       <div class="card-title">⚙️ 수동 만기환급 지급 <span style="font-size:11px;color:var(--accent-yellow);font-weight:400">(관리자 전용)</span></div>
       <div style="display:flex;gap:8px;align-items:flex-end">
         <div class="form-group" style="margin-bottom:0;flex:0 0 200px">
@@ -859,7 +881,9 @@
           <div class="alert alert-info">
             <span>ℹ️</span>
             <div>스마트 컨트랙트가 연령·보험료·보장한도 비율·기가입 건수를 자동으로 심사합니다.<br>
-              통과 시 <strong>대기(Pending)</strong> → 관리자가 최종 승인하면 보험증권이 생성됩니다.</div>
+              <strong>보장한도/월보험료 비율 10배 이하</strong> → 관리자 승인 없이 그 자리에서 즉시 승인되어 보험증권 생성<br>
+              <strong>비율 100배 초과</strong> 또는 나이·최소보험료·가입건수 룰 위반 → 즉시 거절(트랜잭션은 성공, 청약만 거절 처리)<br>
+              <strong>비율 10~100배 사이</strong> → 대기(Pending) 상태로 접수되어 관리자 수동 심사 필요</div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
             <div class="form-group" style="margin-bottom:0">
@@ -901,13 +925,15 @@
           <ul style="padding-left:16px;line-height:2;color:var(--text-secondary);font-size:13px">
             <li>가입 가능 연령: <strong style="color:var(--text-primary)">만 18세 ~ 75세</strong></li>
             <li id="appMinPremiumRule">최소 월 보험료: <strong style="color:var(--text-primary)">1 USDC 이상</strong></li>
-            <li>보장한도/월보험료: <strong style="color:var(--text-primary)">100배 이하</strong></li>
             <li>1인 동시 가입: <strong style="color:var(--text-primary)">최대 3건</strong></li>
+            <li>보장한도/월보험료 <strong style="color:var(--accent-green)">10배 이하</strong>: <strong style="color:var(--text-primary)">즉시 자동승인</strong></li>
+            <li>보장한도/월보험료 <strong style="color:var(--accent-yellow)">10~100배</strong>: <strong style="color:var(--text-primary)">관리자 심사 대기</strong></li>
+            <li>보장한도/월보험료 <strong style="color:var(--accent-red)">100배 초과</strong>: <strong style="color:var(--text-primary)">즉시 거절</strong></li>
             <li>위험 점수 산정: 연령·보장비율 기반 0~100점</li>
           </ul>
           <hr class="divider">
           <div style="font-size:12px;color:var(--text-muted)">
-            💡 위험 점수가 높을수록 고위험군입니다. 관리자가 심사 시 참고합니다.
+            💡 위험 점수는 승인 여부에 영향을 주지 않는 참고용 지표이며, 관리자가 대기중 청약을 심사할 때 참고합니다.
           </div>
         </div>
       </div>
@@ -915,8 +941,18 @@
       <!-- 관리자 청약 심사 패널 -->
       <div>
         <div class="card">
+          <div class="card-title">⚡ 3단계 자동심사 안내</div>
+          <div style="font-size:13px;color:var(--text-secondary);line-height:1.8">
+            <ul style="padding-left:16px;line-height:2">
+              <li>비율 <strong style="color:var(--accent-green)">10배 이하</strong> → 청약 제출 트랜잭션 안에서 바로 보험증권 생성 (상태: <span class="badge badge-approved" style="font-size:11px">승인됨</span>)</li>
+              <li>비율 <strong style="color:var(--accent-yellow)">10~100배</strong> → 상태 <span class="badge badge-pending" style="font-size:11px">대기중</span>, 아래에서 관리자가 승인/거절</li>
+              <li>비율 <strong style="color:var(--accent-red)">100배 초과</strong> 또는 기본 룰 위반 → 즉시 거절 (상태: <span class="badge badge-rejected" style="font-size:11px">거절됨</span>)</li>
+            </ul>
+          </div>
+        </div>
+        <div class="card hidden" id="cardAdminAppReview">
           <div class="card-title">⚙️ 청약 심사 처리 <span style="font-size:11px;color:var(--accent-yellow);font-weight:400">(관리자 전용)</span></div>
-          <div class="admin-only-note">⚠️ 아래 기능은 컨트랙트 오너(관리자)만 사용 가능합니다.</div>
+          <div class="admin-only-note">⚠️ 아래 기능은 컨트랙트 오너(관리자)만 사용 가능하며, 대기중(Pending) 청약에만 적용됩니다.</div>
           <div class="form-group">
             <label>청약 ID</label>
             <input type="number" id="adminAppId" class="form-control" placeholder="청약 ID 입력">
@@ -929,10 +965,6 @@
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn btn-success" onclick="approveApplication()">✅ 청약 승인 (증권 생성)</button>
             <button class="btn btn-danger"  onclick="rejectApplicationAdmin()">❌ 청약 거절</button>
-          </div>
-          <div class="alert alert-info" style="margin-top:12px">
-            <span>💡</span>
-            <div id="appApproveNote">승인 시 보험증권이 자동 생성됩니다. 피보험자에게 USDC가 사전에 있어야 보험료 납입이 가능합니다.</div>
           </div>
         </div>
       </div>
@@ -1041,6 +1073,15 @@
             <button class="btn btn-success btn-block btn-lg" onclick="repayPolicyLoan()">
               💳 대출 상환하기 (원금 + 이자)
             </button>
+
+            <hr class="divider">
+            <div class="form-group">
+              <label>부분 상환 금액 (USDC) <span style="font-size:11px;color:var(--text-muted)">— 발생 이자는 항상 전액 우선 충당, 초과분은 원금 상환</span></label>
+              <input type="number" id="loanPartialAmount" class="form-control" placeholder="이자 이상 입력" min="0" step="0.01">
+            </div>
+            <button class="btn btn-primary btn-block" onclick="repayPolicyLoanPartial()">
+              💵 부분 상환하기
+            </button>
           </div>
         </div>
       </div>
@@ -1123,7 +1164,7 @@
       <div class="state-section">
         <h3>💰 보험 재무 현황</h3>
         <ul class="kv-list">
-          <li><span class="kv-key">컨트랙트 잔액</span><span class="kv-value yellow" id="stateContractBal">-</span></li>
+          <li><span class="kv-key">보험사 잔액</span><span class="kv-value yellow" id="stateContractBal">-</span></li>
           <li><span class="kv-key">총 보험료 수납</span><span class="kv-value blue" id="statePremiums">-</span></li>
           <li><span class="kv-key">총 보험금 지급</span><span class="kv-value red" id="statePaid">-</span></li>
           <li><span class="kv-key">손익 (수납-지급)</span><span class="kv-value green" id="stateProfit">-</span></li>
