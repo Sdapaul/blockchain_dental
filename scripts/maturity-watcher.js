@@ -13,6 +13,12 @@ const { ethers } = require("ethers");
 const fs   = require("fs");
 const path = require("path");
 
+// ethers v6 이벤트 필터 폴링(FilterIdEventSubscriber)이 드물게 내부 오류를 던져
+// 처리되지 않은 Promise 거부로 전체 프로세스가 종료되는 것을 방지 (워처는 계속 실행돼야 함)
+process.on("unhandledRejection", (reason) => {
+  console.error("⚠️  처리되지 않은 오류(무시하고 계속 실행):", reason?.message || reason);
+});
+
 // ── 설정 ──────────────────────────────────────────────────────────
 const RPC_URL     = "http://127.0.0.1:8545";
 const ADMIN_KEY   = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -130,18 +136,6 @@ async function main() {
   async function checkAll() {
     if (usdcContract) await watchContract(usdcContract, 6, "USDC", processed);
     if (krwContract)  await watchContract(krwContract,  0, "KRW",  processed);
-  }
-
-  // 이벤트 리스너
-  if (usdcContract) {
-    usdcContract.on("MaturityRefundPaid", (policyId, patient, refundAmount) => {
-      log(`📢 [USDC] MaturityRefundPaid — 증권 #${policyId}, ${fmtAmount(refundAmount, 6)} 지급 → ${patient}`);
-    });
-  }
-  if (krwContract) {
-    krwContract.on("MaturityRefundPaid", (policyId, patient, refundAmount) => {
-      log(`📢 [KRW] MaturityRefundPaid — 증권 #${policyId}, ${fmtAmount(refundAmount, 0)} 지급 → ${patient}`);
-    });
   }
 
   // 만기 일정 출력

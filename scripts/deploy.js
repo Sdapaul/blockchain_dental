@@ -198,6 +198,41 @@ async function main() {
   console.log(`  ✅ Oracle 주소 등록  : ${ORACLE_ADDRESS}`);
   console.log(`  ✅ Oracle 모드       : USDC + KRW 양쪽 비활성화 (기본값 — 20% 초과 청구는 관리자 수동 심사)`);
 
+  // ── 준비금 계좌(ReserveFund) 시스템 배포 (USDC + KRW) ────────
+  console.log("\n[9/9] ReserveFund(준비금 계좌) 배포 중...");
+  const ReserveFund = await ethers.getContractFactory("ReserveFund");
+  const reserveFund = await ReserveFund.deploy(usdcAddress);
+  await reserveFund.waitForDeployment();
+  const reserveFundAddress = await reserveFund.getAddress();
+  const reserveFundKrw = await ReserveFund.deploy(krwAddress);
+  await reserveFundKrw.waitForDeployment();
+  const reserveFundKrwAddress = await reserveFundKrw.getAddress();
+  console.log(`  ✅ ReserveFund(USDC) 배포 완료: ${reserveFundAddress}`);
+  console.log(`  ✅ ReserveFund(KRW)  배포 완료: ${reserveFundKrwAddress}`);
+
+  // ── 준비금 계좌 초기 세팅 (내 잔액 == 준비금 잔액이 되도록 별도로 추가 지급 후 예치) ──
+  async function seedReserve(token, reserveContract, account, amount) {
+    await (await token.connect(account).faucet(amount)).wait();
+    await (await token.connect(account).approve(await reserveContract.getAddress(), amount)).wait();
+    await (await reserveContract.connect(account).depositReserve(amount)).wait();
+  }
+
+  if (accounts.length > 1) {
+    await seedReserve(usdc, reserveFund,    accounts[1], ethers.parseUnits("1000", 6));
+    await seedReserve(krw,  reserveFundKrw, accounts[1], BigInt("1000000"));
+  }
+  if (accounts.length > 2) {
+    await seedReserve(usdc, reserveFund,    accounts[2], ethers.parseUnits("1000", 6));
+    await seedReserve(krw,  reserveFundKrw, accounts[2], BigInt("1000000"));
+  }
+  if (accounts.length > 4) {
+    await seedReserve(usdc, reserveFund, accounts[4], ethers.parseUnits("1000", 6));
+  }
+  if (accounts.length > 5) {
+    await seedReserve(usdc, reserveFund, accounts[5], ethers.parseUnits("1000", 6));
+  }
+  console.log(`  ✅ 준비금 계좌 초기 세팅 완료: 김덴탈/이치과 (USDC 1,000 + KRW 100만원), 박청약/최이십 (USDC 1,000) — 내 잔액과 동일하게 맞춤`);
+
   // ── 배포 정보 저장 ────────────────────────────────────────────
   const config = {
     network:         network.name,
@@ -209,7 +244,9 @@ async function main() {
       MockUSDC:              usdcAddress,
       DentalInsurance:       insuranceAddress,
       MockKRW:               krwAddress,
-      DentalInsuranceKRW:    insuranceKrwAddress
+      DentalInsuranceKRW:    insuranceKrwAddress,
+      ReserveFund:           reserveFundAddress,
+      ReserveFundKRW:        reserveFundKrwAddress
     }
   };
 
@@ -230,6 +267,9 @@ async function main() {
   console.log(`    MockKRW            : ${krwAddress}`);
   console.log(`    DentalInsuranceKRW : ${insuranceKrwAddress}`);
   console.log(`  Oracle 주소          : ${ORACLE_ADDRESS}`);
+  console.log(`  [준비금 계좌]`);
+  console.log(`    ReserveFund        : ${reserveFundAddress}`);
+  console.log(`    ReserveFundKRW     : ${reserveFundKrwAddress}`);
   console.log(`  config.json 저장     : frontend/config.json`);
   console.log("\n  ▶ 웹 UI: http://localhost:3000");
   console.log("=".repeat(60));

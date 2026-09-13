@@ -143,12 +143,17 @@
       <div class="stat-label" id="labelStatClaims">💰 총 보험금 지급</div>
       <div class="stat-value" id="statClaims">-</div>
     </div>
-    <!-- 내 잔액 -->
-    <div class="stat-card blue">
+    <!-- 내 잔액 (관리자는 거래 주체가 아니므로 숨김) -->
+    <div class="stat-card blue clickable" id="cardMyBalance" onclick="showTab('faucet')">
       <div class="stat-label">👛 내 잔액</div>
       <div class="stat-value" id="statMyBalance">-</div>
     </div>
-    <div class="stat-card yellow">
+    <!-- 준비금 잔액 (고객: 본인 준비금 / 관리자: 전체 고객 합계) -->
+    <div class="stat-card teal clickable" onclick="showTab('reserve')">
+      <div class="stat-label" id="labelStatReserve">🏛️ 내 준비금 잔액</div>
+      <div class="stat-value" id="statReserveBalance">-</div>
+    </div>
+    <div class="stat-card yellow clickable" onclick="showTab('state')">
       <div class="stat-label">🏦 보험사 잔액</div>
       <div class="stat-value" id="statBalance">-</div>
     </div>
@@ -170,6 +175,7 @@
     <button class="tab-btn" data-tab="loan"         onclick="showTab('loan')">💵 약관대출</button>
     <button class="tab-btn" data-tab="claim"   onclick="showTab('claim')">🦷 보험금 청구</button>
     <button class="tab-btn" data-tab="maturity"     onclick="showTab('maturity')">💎 만기환급<span id="maturityAlertBadge" style="color:var(--accent-red);font-size:11px"></span></button>
+    <button class="tab-btn" data-tab="reserve"      onclick="showTab('reserve')">🏛️ 준비금 계좌</button>
     <button id="tabBtnAdmin" class="tab-btn hidden" data-tab="admin"    onclick="showTab('admin')">⚙️ 관리자 패널</button>
     <button class="tab-btn" data-tab="state"        onclick="showTab('state')">📊 블록체인 상태</button>
     <button class="tab-btn" data-tab="log"          onclick="showTab('log')">📜 거래 로그</button>
@@ -202,6 +208,9 @@
           <button id="faucetBtn" class="btn btn-success btn-block btn-lg" onclick="useFaucet()">
             💰 <span id="faucetBtnText">USDC 수령하기</span>
           </button>
+          <button id="faucetReserveBtn" class="btn btn-primary btn-block" style="margin-top:8px" onclick="depositFaucetAmountToReserve()">
+            🏛️ <span id="faucetReserveBtnText">준비금 계좌에 예치</span>
+          </button>
         </div>
       </div>
 
@@ -211,6 +220,9 @@
           <div style="text-align:center;padding:20px 0">
             <div style="font-size:42px;font-weight:700;color:var(--accent-green)" id="myUsdcBal">-</div>
             <div style="color:var(--text-muted);margin-top:6px" id="balanceCurrencySubLabel">USDC (Mock)</div>
+            <hr class="divider" style="margin:14px 0">
+            <div style="font-size:13px;color:var(--text-muted)" id="labelMyReserve">🏛️ 내 준비금 잔액</div>
+            <div style="font-size:24px;font-weight:700;color:var(--accent-cyan);margin-top:4px" id="myReserveBal">-</div>
             <button class="btn btn-ghost btn-sm" onclick="copyMyAddr()" style="margin-top:12px">
               📋 내 주소 복사
             </button>
@@ -708,9 +720,13 @@
               <span style="color:var(--text-muted)">월 보험료</span>
               <span id="autopayPremiumAmt" style="font-weight:600">-</span>
             </div>
-            <div style="display:flex;justify-content:space-between">
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
               <span style="color:var(--text-muted)">다음 납입 기한</span>
               <span id="autopayNextDue" style="font-weight:600">-</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)">자동이체 주기</span>
+              <span id="autopayCurrentInterval" style="font-weight:600">-</span>
             </div>
           </div>
 
@@ -723,14 +739,29 @@
             </button>
             <button class="btn btn-ghost btn-sm" onclick="loadAutopayStatus()">🔄 상태 새로고침</button>
           </div>
+
+          <hr class="divider">
+
+          <div class="form-group">
+            <label>자동이체 주기 선택 (고객 직접 선택, 관리자 승인 불필요)</label>
+            <select id="premiumIntervalSelect" class="form-control">
+              <option value="300">⏱️ 5분 (테스트 전용 — 추후 삭제 예정)</option>
+              <option value="2592000" selected>📅 1개월</option>
+              <option value="7776000">📅 3개월</option>
+            </select>
+          </div>
+          <button class="btn btn-primary btn-block" onclick="setMyPremiumInterval()">
+            🔁 자동이체 주기 변경
+          </button>
         </div>
 
         <!-- 안내 -->
         <div class="card">
           <div class="card-title">📌 자동납부 안내</div>
           <ul style="padding-left:16px;line-height:2;color:var(--text-secondary);font-size:13px">
-            <li><strong>ON</strong>: <code>approve(contract, MaxUint256)</code> — 무제한 허용</li>
-            <li><strong>OFF</strong>: <code>approve(contract, 0)</code> — 허용 취소</li>
+            <li><strong>ON</strong>: <code>approve(contract, MaxUint256)</code> — 무제한 허용, 관리자 승인 없이 즉시 적용</li>
+            <li><strong>OFF</strong>: <code>approve(contract, 0)</code> — 허용 취소, 이 또한 관리자 승인 없이 즉시 적용</li>
+            <li>자동이체 주기(5분/1개월/3개월)는 피보험자 본인이 직접 선택하며, 선택 즉시 다음 납입 기한이 재계산됩니다</li>
             <li>스케줄러가 30초마다 납입 기한을 확인하고 자동 수납합니다</li>
             <li>잔액이 부족하거나 자동납부가 OFF이면 수납이 건너뜁니다</li>
             <li>수납 성공 시 거래 로그에 <code>PremiumAutoCollected</code> 이벤트가 기록됩니다</li>
@@ -818,6 +849,33 @@
         overflow-y:auto;
         margin-top:12px;
       ">-- 증권 ID를 입력하고 조회하세요 --</pre>
+    </div>
+
+    <!-- 만기 설정 변경 (피보험자 본인, 관리자 승인 불필요) -->
+    <div class="card" id="cardMaturityMine">
+      <div class="card-title">🗓️ 내 증권 만기 설정 변경</div>
+      <div class="alert alert-info">
+        <span>ℹ️</span>
+        <div>본인 증권의 만기 시점을 직접 선택할 수 있습니다. 선택 즉시 적용되며 관리자 승인이 필요 없습니다. 이미 만기환급이 지급된 증권은 변경할 수 없습니다.</div>
+      </div>
+      <div class="form-group">
+        <label>보험증권 선택</label>
+        <select id="maturityPolicyId" class="form-control" onchange="loadMyMaturitySetting()">
+          <option value="">-- 증권을 먼저 연결하세요 --</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>만기 시점 선택</label>
+        <select id="maturityIntervalSelect" class="form-control">
+          <option value="300">⏱️ 5분 (테스트 전용 — 추후 삭제 예정)</option>
+          <option value="86400">📅 1일</option>
+          <option value="2592000" selected>📅 1개월</option>
+          <option value="7776000">📅 3개월</option>
+          <option value="31536000">📅 1년</option>
+        </select>
+      </div>
+      <button class="btn btn-primary btn-block" onclick="setMyMaturityInterval()">🔁 만기 변경</button>
+      <div id="myMaturityCurrentBox" style="margin-top:10px;font-size:13px;color:var(--text-muted)"></div>
     </div>
 
     <!-- 수동 지급 (관리자) -->
@@ -1126,6 +1184,102 @@
             </table>
           </div>
           <button class="btn btn-ghost btn-sm" onclick="refreshLoanPolicies()" style="margin-top:8px">🔄 새로고침</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ────────────────────────────────────────────
+       TAB: 준비금 계좌 (Reserve Fund)
+  ──────────────────────────────────────────────── -->
+  <div class="tab-content" id="tab-reserve">
+    <div class="two-col">
+
+      <!-- 좌측: 내 준비금 계좌(일반) 또는 전체 현황(관리자) -->
+      <div>
+        <div id="cardReserveMine" class="card">
+          <div class="card-title">🏛️ 내 준비금 계좌</div>
+          <div class="alert alert-info">
+            <span>ℹ️</span>
+            <div>보험사에 송금하면 준비금으로 적립되며, 연 <strong>5%</strong>가 매일 복리로 쌓입니다.<br>인출 신청 시 그동안의 이자가 먼저 반영된 뒤 지급됩니다.</div>
+          </div>
+          <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
+              <div><span style="color:var(--text-muted)">원금(확정):</span> <strong id="reserveMyPrincipal">-</strong></div>
+              <div><span style="color:var(--text-muted)">예상 잔액(이자포함):</span> <strong id="reserveMyProjected" style="color:var(--accent-green)">-</strong></div>
+              <div><span style="color:var(--text-muted)">미반영 이자:</span> <strong id="reserveMyPendingInterest" style="color:var(--accent-cyan)">-</strong></div>
+              <div><span style="color:var(--text-muted)">누적 이자:</span> <strong id="reserveMyTotalInterest" style="color:var(--accent-cyan)">-</strong></div>
+              <div><span style="color:var(--text-muted)">누적 송금:</span> <strong id="reserveMyTotalDeposited">-</strong></div>
+              <div><span style="color:var(--text-muted)">누적 인출:</span> <strong id="reserveMyTotalWithdrawn">-</strong></div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label id="reserveDepositLabel">송금 금액 (USDC)</label>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">송금 가능 금액(내 지갑): <strong id="reserveMyWalletBal" style="color:var(--text-secondary)">-</strong></div>
+            <input type="number" id="reserveDepositAmount" class="form-control" placeholder="보험사로 송금할 금액" min="0" step="0.01">
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="setReserveDepositMax()" style="margin-bottom:8px">지갑 잔액 전액 입력</button>
+          <button class="btn btn-primary btn-block" onclick="depositReserve()">💸 송금하기 (준비금 적립)</button>
+
+          <hr class="divider">
+
+          <div class="form-group">
+            <label id="reserveWithdrawLabel">인출 금액 (USDC)</label>
+            <input type="number" id="reserveWithdrawAmount" class="form-control" placeholder="인출할 금액" min="0" step="0.01">
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="setReserveWithdrawMax()" style="margin-bottom:8px">예상 잔액 전액 입력</button>
+          <button class="btn btn-success btn-block" onclick="withdrawReserve()">💰 인출하기 (이자 반영 후 지급)</button>
+        </div>
+
+        <div id="cardReserveAdmin" class="card hidden">
+          <div class="card-title">🏛️ 전체 고객 준비금 현황 (관리자)</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:13px;margin-bottom:12px">
+            <div><span style="color:var(--text-muted)">고객 수:</span> <strong id="reserveAdminHolderCount">-</strong></div>
+            <div><span style="color:var(--text-muted)">총 준비금(이자포함):</span> <strong id="reserveAdminTotal" style="color:var(--accent-green)">-</strong></div>
+            <div><span style="color:var(--text-muted)">총 누적이자:</span> <strong id="reserveAdminTotalInterest" style="color:var(--accent-cyan)">-</strong></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>고객</th>
+                  <th class="text-right">원금(확정)</th>
+                  <th class="text-right">예상잔액(이자포함)</th>
+                  <th class="text-right">누적이자</th>
+                  <th class="text-right">누적송금</th>
+                  <th class="text-right">누적인출</th>
+                </tr>
+              </thead>
+              <tbody id="reserveAdminTable">
+                <tr><td colspan="6" class="text-center" style="color:var(--text-muted);padding:20px">데이터 없음</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 우측: 송금/인출 내역 -->
+      <div>
+        <div class="card">
+          <div class="card-title" id="reserveHistoryTitle">📜 내 송금/인출 내역</div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>구분</th>
+                  <th id="reserveHistoryPatientCol" style="display:none">고객</th>
+                  <th class="text-right">금액</th>
+                  <th class="text-right">이후 원금</th>
+                  <th>시각</th>
+                </tr>
+              </thead>
+              <tbody id="reserveHistoryBody">
+                <tr><td colspan="5" class="text-center" style="color:var(--text-muted);padding:20px">내역 없음</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="refreshReserve()" style="margin-top:8px">🔄 새로고침</button>
         </div>
       </div>
     </div>

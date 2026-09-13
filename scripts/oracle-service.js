@@ -21,6 +21,12 @@ const path       = require("path");
 
 const hospitalProvider = require("./hospital-provider/index");
 
+// ethers v6 이벤트 필터 폴링(FilterIdEventSubscriber)이 드물게 내부 오류를 던져
+// 처리되지 않은 Promise 거부로 전체 프로세스가 종료되는 것을 방지 (오라클은 계속 실행돼야 함)
+process.on("unhandledRejection", (reason) => {
+  console.error("⚠️  처리되지 않은 오류(무시하고 계속 실행):", reason?.message || reason);
+});
+
 // ── 설정 ──────────────────────────────────────────────────────────
 const RPC_URL     = process.env.RPC_URL     || "http://127.0.0.1:8545";
 const ORACLE_KEY  = process.env.ORACLE_KEY  || "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";

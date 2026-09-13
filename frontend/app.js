@@ -35,9 +35,10 @@ const INSURANCE_ABI = [
   "function approveClaim(uint256 claimId)",
   "function rejectClaim(uint256 claimId, string reason)",
   "function payClaim(uint256 claimId)",
-  "function getPolicy(uint256 policyId) view returns (tuple(uint256 id, address patient, string patientName, uint256 monthlyPremium, uint256 coverageLimit, uint256 totalPaid, uint256 totalClaimed, uint256 lastPaymentTime, uint256 nextDueTime, bool active, uint256 createdAt, uint256 maturityDate, uint256 maturityRefundRate, bool maturityPaid))",
+  "function getPolicy(uint256 policyId) view returns (tuple(uint256 id, address patient, string patientName, uint256 monthlyPremium, uint256 coverageLimit, uint256 totalPaid, uint256 totalClaimed, uint256 lastPaymentTime, uint256 nextDueTime, bool active, uint256 createdAt, uint256 maturityDate, uint256 maturityRefundRate, bool maturityPaid, uint256 premiumInterval))",
   "function processMaturityRefund(uint256 policyId)",
   "function isMatured(uint256 policyId) view returns (bool)",
+  "function setMyMaturityInterval(uint256 policyId, uint256 intervalSeconds)",
   "function getClaim(uint256 claimId) view returns (tuple(uint256 id, uint256 policyId, address patient, uint256 amount, string treatmentCode, string description, uint8 status, uint256 submittedAt, uint256 processedAt, string rejectReason))",
   "function getPatientPolicies(address patient) view returns (uint256[])",
   "function getPatientClaims(address patient) view returns (uint256[])",
@@ -64,6 +65,7 @@ const INSURANCE_ABI = [
   // 자동납부
   "function collectPremium(uint256 policyId)",
   "function isDue(uint256 policyId) view returns (bool)",
+  "function setMyPremiumInterval(uint256 policyId, uint256 intervalSeconds)",
   "event PremiumAutoCollected(uint256 indexed policyId, address indexed patient, uint256 amount, uint256 totalPaid, uint256 timestamp)",
   // ─── 청약 심사 (Underwriting) ──────────────────────────────
   "function submitApplication(string applicantName, uint256 age, uint256 monthlyPremium, uint256 coverageLimit, uint256 maturityDays, uint256 maturityRefundRate) returns (uint256)",
@@ -90,6 +92,19 @@ const INSURANCE_ABI = [
   "event PolicyLoanRepaid(uint256 indexed policyId, address indexed patient, uint256 principal, uint256 interest, uint256 timestamp)"
 ];
 
+// ─── 준비금 계좌 (Reserve Fund) ────────────────────────────────
+const RESERVE_ABI = [
+  "function depositReserve(uint256 amount)",
+  "function withdrawReserve(uint256 amount)",
+  "function previewBalance(address patient) view returns (uint256 projectedPrincipal, uint256 pendingInterest)",
+  "function getAccount(address patient) view returns (tuple(uint256 principal, uint256 lastAccrualTime, uint256 totalDeposited, uint256 totalWithdrawn, uint256 totalInterestEarned, bool exists))",
+  "function getAllHolders() view returns (address[])",
+  "function getContractBalance() view returns (uint256)",
+  "event ReserveDeposited(address indexed patient, uint256 amount, uint256 newPrincipal, uint256 timestamp)",
+  "event ReserveWithdrawn(address indexed patient, uint256 amount, uint256 newPrincipal, uint256 timestamp)",
+  "event InterestAccrued(address indexed patient, uint256 interestAmount, uint256 newPrincipal, uint256 timestamp)"
+];
+
 // ── Hardhat 계정 이름 매핑 ────────────────────────────────────
 const KNOWN_ACCOUNTS = {
   "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": { name: "관리자",  account: "#0" },
@@ -112,10 +127,13 @@ let signer    = null;
 let userAddr  = null;
 let usdcAddr  = null;
 let insAddr   = null;
+let reserveAddr = null;
 let usdcCtx   = null;
 let insCtx    = null;
+let reserveCtx  = null;
 let usdcSign  = null;
 let insSign   = null;
+let reserveSign = null;
 let isOwner   = false;
 let eventListenersAttached = false;
 
@@ -154,6 +172,15 @@ function fmtUsdc(amount) {
   return `$${parseFloat(fmt(amount)).toLocaleString("ko-KR", {
     minimumFractionDigits: 2, maximumFractionDigits: 2
   })}`;
+}
+function fmtInterval(seconds) {
+  const s = Number(seconds);
+  if (s === 300)      return "⏱️ 5분 (테스트 전용)";
+  if (s === 86400)    return "📅 1일";
+  if (s === 2592000)  return "📅 1개월";
+  if (s === 7776000)  return "📅 3개월";
+  if (s === 31536000) return "📅 1년";
+  return `${s}초`;
 }
 function shortAddr(addr) {
   if (!addr) return "-";
@@ -404,6 +431,15 @@ window.addEventListener("unhandledrejection", (e) => {
   addLog("error", `[미처리 Promise 거절] ${e.reason?.message || e.reason}`,
     e.reason ? parseError(e.reason) : "");
 });
+
+// input[type=number]에 포커스된 채로 스크롤하면 크롬이 값을 조용히 증감시키는 것을 방지
+// (예: 100 입력 후 페이지 스크롤 → 99.78처럼 의도치 않게 값이 바뀌는 문제)
+document.addEventListener("wheel", (e) => {
+  const active = document.activeElement;
+  if (active && active.tagName === "INPUT" && active.type === "number") {
+    active.blur();
+  }
+}, { passive: true });
 
 // ── 토스트 ────────────────────────────────────────────────────
 function showToast(msg, type = "info") {
@@ -687,6 +723,13 @@ async function loadContracts(usdcAddress, insAddress) {
     usdcSign = new ethers.Contract(usdcAddr, USDC_ABI, signer);
     insSign  = new ethers.Contract(insAddr,  INSURANCE_ABI, signer);
 
+    if (reserveAddr && ethers.isAddress(reserveAddr)) {
+      reserveCtx  = new ethers.Contract(reserveAddr, RESERVE_ABI, provider);
+      reserveSign = new ethers.Contract(reserveAddr, RESERVE_ABI, signer);
+    } else {
+      reserveCtx = null; reserveSign = null;
+    }
+
     // 오너 조회
     addLog("call", "owner() 조회 중...");
     const ownerAddr = await insCtx.owner();
@@ -768,11 +811,13 @@ function applyConfigForCurrency() {
   if (currencyMode === 'KRW') {
     el("usdcAddr").value = configCache.contracts.MockKRW            || "";
     el("insAddr").value  = configCache.contracts.DentalInsuranceKRW || "";
+    reserveAddr = configCache.contracts.ReserveFundKRW || "";
     if (el("tokenAddrLabel")) el("tokenAddrLabel").textContent = "📄 MockKRW 컨트랙트 주소";
     if (el("insAddrLabel"))   el("insAddrLabel").textContent   = "🏥 DentalInsurance(KRW) 컨트랙트 주소";
   } else {
     el("usdcAddr").value = configCache.contracts.MockUSDC        || "";
     el("insAddr").value  = configCache.contracts.DentalInsurance || "";
+    reserveAddr = configCache.contracts.ReserveFund || "";
     if (el("tokenAddrLabel")) el("tokenAddrLabel").textContent = "📄 MockUSDC 컨트랙트 주소";
     if (el("insAddrLabel"))   el("insAddrLabel").textContent   = "🏥 DentalInsurance 컨트랙트 주소";
   }
@@ -798,6 +843,7 @@ function updateCurrencyLabels() {
     `💰 테스트 ${sym} 수령 (파우셋)`;
   if (el("faucetLabel")) el("faucetLabel").textContent = `수령 금액 (${sym})`;
   if (el("faucetBtnText")) el("faucetBtnText").textContent = `${sym} 수령하기`;
+  if (el("faucetReserveBtnText")) el("faucetReserveBtnText").textContent = `준비금 계좌에 예치`;
   if (el("faucetDesc")) el("faucetDesc").textContent = isKrw
     ? "이것은 테스트용 가상 원화(KRW)입니다. 최대 1회 1,000만원 수령 가능하며, 보험료 납입 및 테스트에 사용됩니다."
     : "이것은 테스트용 가상 USDC입니다. 최대 1회 10,000 USDC 수령 가능하며, 보험료 납입 및 테스트에 사용됩니다.";
@@ -858,6 +904,10 @@ function updateCurrencyLabels() {
     : `납입 보험료 100 USDC, 환급율 70% 기준:<br>
        해지환급금 = 100 × 70% = <strong style="color:var(--accent-green)">70 USDC</strong><br>
        최대 대출액 = 70 × 80% = <strong style="color:var(--accent-blue)">56 USDC</strong>`;
+
+  // ── 준비금 계좌 탭 ────────────────────────────────────────
+  if (el("reserveDepositLabel"))  el("reserveDepositLabel").textContent  = `송금 금액 (${sym})`;
+  if (el("reserveWithdrawLabel")) el("reserveWithdrawLabel").textContent = `인출 금액 (${sym})`;
 }
 
 // ── 통화 전환 ────────────────────────────────────────────────
@@ -972,6 +1022,24 @@ function attachEventListeners() {
     );
     refreshAll();
   });
+
+  if (reserveCtx) {
+    reserveCtx.on("ReserveDeposited", (patient, amount, newPrincipal, ts, event) => {
+      addLog("event", `🏛️ 준비금 송금 이벤트: ${fmtUsdc(amount)}`,
+        `고객     : ${patient}\n이후 원금: ${fmtUsdc(newPrincipal)}`,
+        event.log.transactionHash);
+      refreshAll();
+    });
+    reserveCtx.on("ReserveWithdrawn", (patient, amount, newPrincipal, ts, event) => {
+      addLog("event", `🏛️ 준비금 인출 이벤트: ${fmtUsdc(amount)}`,
+        `고객     : ${patient}\n이후 원금: ${fmtUsdc(newPrincipal)}`,
+        event.log.transactionHash);
+      refreshAll();
+    });
+    reserveCtx.on("InterestAccrued", (patient, interestAmount, newPrincipal, ts, event) => {
+      refreshAll();
+    });
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -991,7 +1059,8 @@ async function refreshAll() {
       refreshApplications(),
       refreshLoanPolicies(),
       refreshPremiumHistory(),
-      refreshClaimCoverageInfo()
+      refreshClaimCoverageInfo(),
+      refreshReserve()
     ]);
   } catch (err) {
     addLog("error", "데이터 새로고침 실패", parseError(err));
@@ -1027,6 +1096,11 @@ async function refreshStats() {
       el("statPremiums").textContent = fmtUsdc(totalPremiums);
     }
     el("statBalance").textContent = fmtUsdc(await insCtx.getContractBalance());
+
+    // ── 준비금 잔액: 일반 계정은 본인 것만("내 준비금 잔액"), 관리자는 전체 합계("보험사 준비금 잔액") ───
+    if (reserveCtx && el("statReserveBalance")) {
+      el("statReserveBalance").textContent = fmtUsdc(await getViewerReserveBalance());
+    }
 
     // ── 보험증권: 전체 vs 활성 ────────────────────────────────
     const activeCount = policies.filter(p => p.active).length;
@@ -1087,14 +1161,30 @@ async function refreshStats() {
   }
 }
 
+// 일반 계정: 본인 준비금 잔액만 / 관리자: 전체 고객 준비금 합산액(보험사 준비금 잔액)
+async function getViewerReserveBalance() {
+  if (!reserveCtx) return 0n;
+  if (isOwner) {
+    const holders  = await reserveCtx.getAllHolders().catch(() => []);
+    const previews = await Promise.all(holders.map(a => reserveCtx.previewBalance(a).catch(() => ({ projectedPrincipal: 0n }))));
+    return previews.reduce((s, p) => s + p.projectedPrincipal, 0n);
+  }
+  if (!userAddr) return 0n;
+  const preview = await reserveCtx.previewBalance(userAddr).catch(() => ({ projectedPrincipal: 0n }));
+  return preview.projectedPrincipal;
+}
+
 async function refreshMyBalance() {
   if (!usdcCtx || !userAddr) return;
   try {
-    const bal = await usdcCtx.balanceOf(userAddr);
+    // 관리자는 거래 주체가 아니므로 개인 지갑 잔액은 0으로 표시
+    const bal = isOwner ? 0n : await usdcCtx.balanceOf(userAddr);
     el("myUsdcBal").textContent     = fmtUsdc(bal);
     el("statMyBalance").textContent = fmtUsdc(bal);
     const premBalEl = el("premiumMyBalance");
     if (premBalEl) premBalEl.textContent = fmtUsdc(bal);
+
+    if (el("myReserveBal")) el("myReserveBal").textContent = fmtUsdc(await getViewerReserveBalance());
   } catch (err) {
     addLog("error", "잔액 조회 실패", parseError(err));
   }
@@ -1185,6 +1275,13 @@ async function useFaucet() {
       showToast(`${fmtUsdc(amount)} ${tokenName} 수령 완료!`, "success");
     }
   );
+}
+
+// 파우셋 탭에서 입력한 금액을 그대로 준비금 계좌에 예치 (기존 지갑 잔액에서 차감)
+// USDC 수령과는 완전히 별개의 독립된 동작 — depositReserve()를 그대로 재사용
+async function depositFaucetAmountToReserve() {
+  if (el("reserveDepositAmount")) el("reserveDepositAmount").value = el("faucetAmount")?.value || "";
+  await depositReserve();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1291,11 +1388,23 @@ async function refreshPolicies() {
 }
 
 function updateAdminOnlyVisibility() {
-  ["tabBtnAdmin", "cardCreatePolicy", "cardManualMaturity", "cardAdminAppReview"].forEach(id => {
+  ["tabBtnAdmin", "cardCreatePolicy", "cardManualMaturity", "cardAdminAppReview", "cardReserveAdmin"].forEach(id => {
     const elm = el(id);
     if (!elm) return;
     elm.classList.toggle("hidden", !isOwner);
   });
+  // 관리자는 거래 주체가 아니므로 "내 잔액"/"내 준비금 계좌"/"내 만기 설정" 카드는 숨김
+  el("cardMyBalance")?.classList.toggle("hidden", isOwner);
+  el("cardReserveMine")?.classList.toggle("hidden", isOwner);
+  el("cardMaturityMine")?.classList.toggle("hidden", isOwner);
+  // 관리자는 테스트 USDC를 받을 필요가 없으므로 파우셋 버튼은 숨김
+  el("faucetBtn")?.classList.toggle("hidden", isOwner);
+  if (el("reserveHistoryPatientCol")) el("reserveHistoryPatientCol").style.display = isOwner ? "" : "none";
+  if (el("reserveHistoryTitle")) el("reserveHistoryTitle").textContent = isOwner ? "📜 전체 송금/인출 내역" : "📜 내 송금/인출 내역";
+  // 준비금 잔액 라벨: 관리자는 "보험사 준비금 잔액"(전체 합계), 일반 계정은 "내 준비금 잔액"(본인 것)
+  const reserveLabel = isOwner ? "🏛️ 보험사 준비금 잔액" : "🏛️ 내 준비금 잔액";
+  if (el("labelStatReserve")) el("labelStatReserve").textContent = reserveLabel;
+  if (el("labelMyReserve"))   el("labelMyReserve").textContent   = reserveLabel;
   // 관리자 전용 탭이 열려있는 상태에서 권한을 잃으면(계정 전환 등) 다른 탭으로 이동
   if (!isOwner && el("tab-admin")?.classList.contains("active")) {
     showTab("faucet");
@@ -1307,7 +1416,7 @@ function updatePolicySelect(policies) {
   const myPolicies = userAddr
     ? policies.filter(p => p.patient.toLowerCase() === userAddr.toLowerCase())
     : [];
-  ["premiumPolicyId", "claimPolicyId", "autopayPolicyId", "loanPolicyId"].forEach(selId => {
+  ["premiumPolicyId", "claimPolicyId", "autopayPolicyId", "loanPolicyId", "maturityPolicyId"].forEach(selId => {
     const sel = el(selId);
     if (!sel) return;
     const cur = sel.value;
@@ -2067,6 +2176,39 @@ async function processMaturityRefund(policyId) {
   );
 }
 
+async function loadMyMaturitySetting() {
+  const policyId = el("maturityPolicyId")?.value;
+  const box      = el("myMaturityCurrentBox");
+  if (!box) return;
+  if (!policyId || !insCtx) { box.textContent = ""; return; }
+
+  try {
+    const p = await insCtx.getPolicy(policyId);
+    box.textContent = p.maturityPaid
+      ? "💎 이미 만기환급이 지급된 증권입니다 (변경 불가)"
+      : `현재 만기일: ${tsToDate(p.maturityDate)}`;
+  } catch (err) {
+    addLog("error", "만기 설정 조회 실패", parseError(err));
+  }
+}
+
+async function setMyMaturityInterval() {
+  const policyId = el("maturityPolicyId")?.value;
+  if (!policyId || !insSign) { showToast("증권을 선택하세요.", "error"); return; }
+  const interval = el("maturityIntervalSelect")?.value;
+  if (!interval) { showToast("만기 시점을 선택하세요.", "warning"); return; }
+
+  addLog("step", `[만기 변경] 증권 #${policyId} — ${fmtInterval(interval)} 후`);
+  await sendTx(
+    async () => insSign.setMyMaturityInterval(policyId, interval),
+    `만기 변경 (증권 #${policyId}): ${fmtInterval(interval)} 후`,
+    async () => {
+      await Promise.all([loadMyMaturitySetting(), refreshMaturity()]);
+      showToast("만기 설정이 변경되었습니다.", "success");
+    }
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  자동납부 (Auto Premium Payment)
 // ═══════════════════════════════════════════════════════════════
@@ -2181,12 +2323,34 @@ async function loadAutopayStatus() {
       ? "⏰ 납입 기한 초과!"
       : tsToDate(p.nextDueTime);
 
+    const intervalEl = el("autopayCurrentInterval");
+    if (intervalEl) intervalEl.textContent = fmtInterval(p.premiumInterval);
+    const intervalSel = el("premiumIntervalSelect");
+    if (intervalSel) intervalSel.value = p.premiumInterval.toString();
+
     if (onBtn)  onBtn.disabled  = false;
     if (offBtn) offBtn.disabled = false;
 
   } catch (err) {
     addLog("error", "자동납부 상태 조회 실패", parseError(err));
   }
+}
+
+async function setMyPremiumInterval() {
+  const policyId = el("autopayPolicyId")?.value;
+  if (!policyId || !insSign) { showToast("증권을 선택하세요.", "error"); return; }
+  const interval = el("premiumIntervalSelect")?.value;
+  if (!interval) { showToast("자동이체 주기를 선택하세요.", "warning"); return; }
+
+  addLog("step", `[자동이체 주기 변경] 증권 #${policyId} — ${fmtInterval(interval)}`);
+  await sendTx(
+    async () => insSign.setMyPremiumInterval(policyId, interval),
+    `자동이체 주기 변경 (증권 #${policyId}): ${fmtInterval(interval)}`,
+    async () => {
+      await Promise.all([loadAutopayStatus(), refreshAutopaySchedule()]);
+      showToast("자동이체 주기가 변경되었습니다.", "success");
+    }
+  );
 }
 
 async function enableAutoPay() {
@@ -2407,7 +2571,8 @@ async function refreshLoanInfo() {
 }
 
 function setLoanAmount(ratio) {
-  if (_loanMaxAmount <= 0n) { showToast("증권을 먼저 선택하세요.", "warning"); return; }
+  if (!el("loanPolicyId")?.value) { showToast("증권을 먼저 선택하세요.", "warning"); return; }
+  if (_loanMaxAmount <= 0n) { showToast("보험료 납입 후 약관대출 가능합니다.", "warning"); return; }
   const amt = (_loanMaxAmount * BigInt(Math.floor(ratio * 100))) / 100n;
   const dec = stableDecimals();
   el("loanAmount").value = dec === 0
@@ -2555,11 +2720,13 @@ async function refreshLoanPolicies() {
     }
 
     if (tbody) {
-      if (ids.length === 0) {
+      // 관리자: 전체 증권 현황 조회 / 일반 계정: 본인 증권만
+      const tableIds = isOwner ? await insCtx.getAllPolicyIds() : ids;
+      if (tableIds.length === 0) {
         tbody.innerHTML = `<tr><td colspan="5" class="text-center" style="color:var(--text-muted);padding:20px">보험증권이 없습니다</td></tr>`;
         return;
       }
-      const rows = await Promise.all(ids.map(async id => {
+      const rows = await Promise.all(tableIds.map(async id => {
         const [policy, maxLoan, loan] = await Promise.all([
           insCtx.getPolicy(id),
           insCtx.getMaxLoanAmount(id),
@@ -2586,6 +2753,166 @@ async function refreshLoanPolicies() {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  준비금 계좌 (Reserve Fund)
+// ═══════════════════════════════════════════════════════════════
+let _reserveProjected = 0n;
+let _reserveWalletBal = 0n;
+
+async function depositReserve() {
+  addLog("step", "[준비금 송금] 시작");
+  if (!reserveSign) { showToast("컨트랙트를 먼저 연결하세요.", "warning"); return; }
+  const amount = parseUsdc(el("reserveDepositAmount")?.value);
+  if (amount <= 0n) { showToast("송금 금액을 입력하세요.", "warning"); return; }
+
+  const bal = await usdcCtx.balanceOf(userAddr).catch(() => 0n);
+  if (bal < amount) {
+    addLog("error", "잔액 부족", `보유: ${fmtUsdc(bal)} / 필요: ${fmtUsdc(amount)}`);
+    showToast(`${stableName()} 잔액이 부족합니다.`, "error"); return;
+  }
+
+  try {
+    const allowance = await usdcCtx.allowance(userAddr, reserveAddr);
+    if (allowance < amount) {
+      addLog("step", `[1/2] ${stableName()} approve(${fmtUsdc(amount)}) 요청`);
+      const approveTx = await usdcSign.approve(reserveAddr, amount);
+      await approveTx.wait();
+      addLog("success", "approve 완료", "", approveTx.hash);
+    }
+  } catch (err) {
+    addLog("error", "approve 실패", parseError(err));
+    showToast("승인 실패: " + (err.shortMessage || err.message), "error"); return;
+  }
+
+  await sendTx(
+    async () => reserveSign.depositReserve(amount),
+    `준비금 송금: ${fmtUsdc(amount)}`,
+    async () => {
+      el("reserveDepositAmount").value = "";
+      await Promise.all([refreshMyBalance(), refreshReserve(), refreshStats()]);
+    }
+  );
+}
+
+function setReserveWithdrawMax() {
+  if (_reserveProjected <= 0n) { showToast("인출 가능한 준비금이 없습니다.", "warning"); return; }
+  const dec = stableDecimals();
+  el("reserveWithdrawAmount").value = dec === 0
+    ? _reserveProjected.toString()
+    : parseFloat(ethers.formatUnits(_reserveProjected, dec)).toFixed(2);
+}
+
+function setReserveDepositMax() {
+  if (_reserveWalletBal <= 0n) { showToast("송금 가능한 지갑 잔액이 없습니다.", "warning"); return; }
+  const dec = stableDecimals();
+  el("reserveDepositAmount").value = dec === 0
+    ? _reserveWalletBal.toString()
+    : parseFloat(ethers.formatUnits(_reserveWalletBal, dec)).toFixed(2);
+}
+
+async function withdrawReserve() {
+  addLog("step", "[준비금 인출] 시작");
+  if (!reserveSign) { showToast("컨트랙트를 먼저 연결하세요.", "warning"); return; }
+  const amount = parseUsdc(el("reserveWithdrawAmount")?.value);
+  if (amount <= 0n) { showToast("인출 금액을 입력하세요.", "warning"); return; }
+
+  await sendTx(
+    async () => reserveSign.withdrawReserve(amount),
+    `준비금 인출: ${fmtUsdc(amount)}`,
+    async () => {
+      el("reserveWithdrawAmount").value = "";
+      await Promise.all([refreshMyBalance(), refreshReserve(), refreshStats()]);
+    }
+  );
+}
+
+async function refreshReserve() {
+  if (!reserveCtx) return;
+  try {
+    // ── 내 계좌 현황 (일반 계정) ──────────────────────────────
+    if (!isOwner && userAddr) {
+      const [acc, preview, walletBal] = await Promise.all([
+        reserveCtx.getAccount(userAddr),
+        reserveCtx.previewBalance(userAddr),
+        usdcCtx ? usdcCtx.balanceOf(userAddr).catch(() => 0n) : 0n
+      ]);
+      _reserveProjected = preview.projectedPrincipal;
+      _reserveWalletBal = walletBal;
+      el("reserveMyPrincipal").textContent       = fmtUsdc(acc.principal);
+      el("reserveMyProjected").textContent       = fmtUsdc(preview.projectedPrincipal);
+      el("reserveMyPendingInterest").textContent = fmtUsdc(preview.pendingInterest);
+      el("reserveMyTotalInterest").textContent   = fmtUsdc(acc.totalInterestEarned + preview.pendingInterest);
+      el("reserveMyTotalDeposited").textContent  = fmtUsdc(acc.totalDeposited);
+      el("reserveMyTotalWithdrawn").textContent  = fmtUsdc(acc.totalWithdrawn);
+      if (el("reserveMyWalletBal")) el("reserveMyWalletBal").textContent = fmtUsdc(walletBal);
+    }
+
+    // ── 전체 고객 현황 (관리자) ───────────────────────────────
+    if (isOwner) {
+      const holders = await reserveCtx.getAllHolders();
+      const rows = await Promise.all(holders.map(async addr => {
+        const [acc, preview] = await Promise.all([
+          reserveCtx.getAccount(addr),
+          reserveCtx.previewBalance(addr)
+        ]);
+        return { addr, acc, preview };
+      }));
+
+      const totalProjected = rows.reduce((s, r) => s + r.preview.projectedPrincipal, 0n);
+      const totalInterest  = rows.reduce((s, r) => s + r.acc.totalInterestEarned + r.preview.pendingInterest, 0n);
+      el("reserveAdminHolderCount").textContent   = rows.length.toString();
+      el("reserveAdminTotal").textContent         = fmtUsdc(totalProjected);
+      el("reserveAdminTotalInterest").textContent = fmtUsdc(totalInterest);
+
+      const tbody = el("reserveAdminTable");
+      if (tbody) {
+        tbody.innerHTML = rows.length === 0
+          ? `<tr><td colspan="6" class="text-center" style="color:var(--text-muted);padding:20px">준비금 계좌가 없습니다</td></tr>`
+          : rows.map(r => {
+              const info = getAccountInfo(r.addr);
+              return `<tr>
+                <td>${info ? info.name : shortAddr(r.addr)}</td>
+                <td class="text-right">${fmtUsdc(r.acc.principal)}</td>
+                <td class="text-right" style="color:var(--accent-green)">${fmtUsdc(r.preview.projectedPrincipal)}</td>
+                <td class="text-right" style="color:var(--accent-cyan)">${fmtUsdc(r.acc.totalInterestEarned + r.preview.pendingInterest)}</td>
+                <td class="text-right">${fmtUsdc(r.acc.totalDeposited)}</td>
+                <td class="text-right">${fmtUsdc(r.acc.totalWithdrawn)}</td>
+              </tr>`;
+            }).join("");
+      }
+    }
+
+    // ── 송금/인출 내역 ────────────────────────────────────────
+    const historyBody = el("reserveHistoryBody");
+    if (historyBody) {
+      const [depEvents, wdEvents] = await Promise.all([
+        reserveCtx.queryFilter(isOwner ? reserveCtx.filters.ReserveDeposited() : reserveCtx.filters.ReserveDeposited(userAddr)).catch(() => []),
+        reserveCtx.queryFilter(isOwner ? reserveCtx.filters.ReserveWithdrawn() : reserveCtx.filters.ReserveWithdrawn(userAddr)).catch(() => [])
+      ]);
+      const rows = [
+        ...depEvents.map(ev => ({ type: "송금", patient: ev.args.patient, amount: ev.args.amount, newPrincipal: ev.args.newPrincipal, ts: ev.args.timestamp })),
+        ...wdEvents.map(ev => ({ type: "인출", patient: ev.args.patient, amount: ev.args.amount, newPrincipal: ev.args.newPrincipal, ts: ev.args.timestamp }))
+      ].sort((a, b) => Number(b.ts) - Number(a.ts));
+
+      const histColspan = isOwner ? 5 : 4;
+      historyBody.innerHTML = rows.length === 0
+        ? `<tr><td colspan="${histColspan}" class="text-center" style="color:var(--text-muted);padding:20px">내역 없음</td></tr>`
+        : rows.map(r => {
+            const info = getAccountInfo(r.patient);
+            return `<tr>
+              <td>${r.type === "송금" ? `<span class="badge badge-approved">💸 송금</span>` : `<span class="badge badge-pending">💰 인출</span>`}</td>
+              ${isOwner ? `<td>${info ? info.name : shortAddr(r.patient)}</td>` : ""}
+              <td class="text-right">${fmtUsdc(r.amount)}</td>
+              <td class="text-right" style="color:var(--text-muted)">${fmtUsdc(r.newPrincipal)}</td>
+              <td style="font-size:11px">${tsToDate(r.ts)}</td>
+            </tr>`;
+          }).join("");
+    }
+  } catch (err) {
+    addLog("error", "준비금 조회 실패", parseError(err));
+  }
+}
+
 // ── 탭 전환 ──────────────────────────────────────────────────
 function showTab(tabName) {
   if (tabName === "admin" && !isOwner) {
@@ -2608,6 +2935,7 @@ function showTab(tabName) {
   if (tabName === "autopay")        refreshAutopaySchedule();
   if (tabName === "underwriting")   refreshApplications();
   if (tabName === "loan")           refreshLoanPolicies();
+  if (tabName === "reserve")        refreshReserve();
 }
 
 // ── 내 주소 복사 ──────────────────────────────────────────────

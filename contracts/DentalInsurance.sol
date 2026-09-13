@@ -33,6 +33,7 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
         uint256 maturityDate;     // 만기일 (timestamp)
         uint256 maturityRefundRate; // 만기환급율 (0~100, totalPaid 대비 %)
         bool    maturityPaid;     // 만기환급 지급 완료 여부
+        uint256 premiumInterval;  // 자동이체(납입) 주기 (초 단위, 기본 30일)
     }
 
     struct Claim {
@@ -383,22 +384,18 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
     ) internal returns (uint256) {
         uint256 policyId = nextPolicyId++;
 
-        policies[policyId] = Policy({
-            id:                policyId,
-            patient:           patient,
-            patientName:       patientName,
-            monthlyPremium:    monthlyPremium,
-            coverageLimit:     coverageLimit,
-            totalPaid:         0,
-            totalClaimed:      0,
-            lastPaymentTime:   0,
-            nextDueTime:       block.timestamp + 30 days,
-            active:            true,
-            createdAt:         block.timestamp,
-            maturityDate:      maturityDate,
-            maturityRefundRate: maturityRefundRate,
-            maturityPaid:      false
-        });
+        Policy storage policy = policies[policyId];
+        policy.id                = policyId;
+        policy.patient            = patient;
+        policy.patientName        = patientName;
+        policy.monthlyPremium     = monthlyPremium;
+        policy.coverageLimit      = coverageLimit;
+        policy.nextDueTime        = block.timestamp + 30 days;
+        policy.active             = true;
+        policy.createdAt          = block.timestamp;
+        policy.maturityDate       = maturityDate;
+        policy.maturityRefundRate = maturityRefundRate;
+        policy.premiumInterval    = 30 days;
 
         _patientPolicies[patient].push(policyId);
         _allPolicyIds.push(policyId);
@@ -748,6 +745,72 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev 자동이체(납입) 주기 변경 (관리자 전용, 초 단위). 다음 납입 기한도 즉시 재계산됨.
+     */
+    function setPremiumInterval(uint256 policyId, uint256 intervalSeconds) external onlyOwner {
+        Policy storage policy = policies[policyId];
+        require(policy.id != 0, "Policy not found");
+        require(intervalSeconds > 0, "Interval must be > 0");
+        policy.premiumInterval = intervalSeconds;
+        policy.nextDueTime     = block.timestamp + intervalSeconds;
+    }
+
+    uint256 public constant PREMIUM_INTERVAL_TEST      = 5 minutes; // 테스트 전용 — 추후 삭제 예정
+    uint256 public constant PREMIUM_INTERVAL_MONTHLY   = 30 days;
+    uint256 public constant PREMIUM_INTERVAL_QUARTERLY = 90 days;
+
+    /**
+     * @dev 피보험자 본인이 자동이체 주기를 선택 (5분/1개월/3개월 중 택1). 관리자 승인 불필요, 즉시 적용.
+     */
+    function setMyPremiumInterval(uint256 policyId, uint256 intervalSeconds) external {
+        Policy storage policy = policies[policyId];
+        require(policy.patient == msg.sender, "Not the policy holder");
+        require(
+            intervalSeconds == PREMIUM_INTERVAL_TEST ||
+            intervalSeconds == PREMIUM_INTERVAL_MONTHLY ||
+            intervalSeconds == PREMIUM_INTERVAL_QUARTERLY,
+            "Invalid interval"
+        );
+        policy.premiumInterval = intervalSeconds;
+        policy.nextDueTime     = block.timestamp + intervalSeconds;
+    }
+
+    /**
+     * @dev 만기일 변경 (관리자 전용)
+     */
+    function setMaturityDate(uint256 policyId, uint256 newMaturityDate) external onlyOwner {
+        Policy storage policy = policies[policyId];
+        require(policy.id != 0, "Policy not found");
+        require(!policy.maturityPaid, "Maturity already paid");
+        require(newMaturityDate > block.timestamp, "Maturity must be in future");
+        policy.maturityDate = newMaturityDate;
+    }
+
+    uint256 public constant MATURITY_OPTION_TEST     = 5 minutes; // 테스트 전용 — 추후 삭제 예정
+    uint256 public constant MATURITY_OPTION_DAILY     = 1 days;
+    uint256 public constant MATURITY_OPTION_MONTHLY   = 30 days;
+    uint256 public constant MATURITY_OPTION_QUARTERLY = 90 days;
+    uint256 public constant MATURITY_OPTION_YEARLY    = 365 days;
+
+    /**
+     * @dev 피보험자 본인이 만기 시점을 선택 (5분/1일/1개월/3개월/1년 중 택1). 관리자 승인 불필요, 즉시 적용.
+     */
+    function setMyMaturityInterval(uint256 policyId, uint256 intervalSeconds) external {
+        Policy storage policy = policies[policyId];
+        require(policy.patient == msg.sender, "Not the policy holder");
+        require(!policy.maturityPaid, "Maturity already paid");
+        require(
+            intervalSeconds == MATURITY_OPTION_TEST ||
+            intervalSeconds == MATURITY_OPTION_DAILY ||
+            intervalSeconds == MATURITY_OPTION_MONTHLY ||
+            intervalSeconds == MATURITY_OPTION_QUARTERLY ||
+            intervalSeconds == MATURITY_OPTION_YEARLY,
+            "Invalid interval"
+        );
+        policy.maturityDate = block.timestamp + intervalSeconds;
+    }
+
+    /**
      * @dev 컨트랙트에 준비금 입금 (관리자 전용)
      */
     function depositFunds(uint256 amount) external onlyOwner {
@@ -775,7 +838,7 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
 
         policy.totalPaid       += amount;
         policy.lastPaymentTime  = block.timestamp;
-        policy.nextDueTime      = block.timestamp + 30 days;
+        policy.nextDueTime      = block.timestamp + policy.premiumInterval;
         totalPremiumsCollected += amount;
 
         emit PremiumPaid(policyId, msg.sender, amount, policy.totalPaid, block.timestamp);
@@ -999,7 +1062,7 @@ contract DentalInsurance is Ownable, ReentrancyGuard {
 
         policy.totalPaid       += amount;
         policy.lastPaymentTime  = block.timestamp;
-        policy.nextDueTime      = block.timestamp + 30 days;
+        policy.nextDueTime      = block.timestamp + policy.premiumInterval;
         totalPremiumsCollected += amount;
 
         emit PremiumPaid(policyId, policy.patient, amount, policy.totalPaid, block.timestamp);
